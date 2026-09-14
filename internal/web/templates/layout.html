@@ -1,0 +1,23 @@
+{{define "head"}}<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>opsagent</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/htmx.min.js"></script>
+</head>{{end}}
+
+{{define "nav"}}<header>
+  <a class="brand" href="/">opsagent</a>
+  <nav>
+    <a href="/incidents">Incidents</a>
+    <a href="/groups">Groups</a>
+    <a href="/hosts">Hosts</a>
+    <a href="/repos">Repos</a>
+    <a href="/history">History</a>
+    <a href="/memory">Memory</a>
+  </nav>
+</header>{{end}}
+
+{{define "foot"}}<footer>
+  opsagent &mdash; read-only incident diagnosis
+</footer>{{end}}

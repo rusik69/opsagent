@@ -1,0 +1,46 @@
+{{define "incident_partial"}}
+{{template "incident_root" .}}
+{{end}}
+
+{{define "diagnosis_partial"}}
+{{template "diagnosis_block" .}}
+{{template "commands_block" .}}
+{{end}}
+
+{{define "memory_partial"}}
+<table>
+  <thead><tr><th>ID</th><th>Topic</th><th>Content</th><th>Tags</th><th>Created</th></tr></thead>
+  <tbody>
+  {{range .Memories}}
+    <tr>
+      <td>{{.ID}}</td>
+      <td><strong>{{.Topic}}</strong></td>
+      <td class="muted">{{.Content}}</td>
+      <td>{{range .Tags}}<span class="badge info">{{.}}</span> {{end}}</td>
+      <td class="muted">{{.CreatedAt.Format "2006-01-02 15:04"}}</td>
+    </tr>
+  {{else}}
+    <tr><td colspan="5" class="muted">No memories stored yet.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+{{end}}
+
+{{define "instructions_partial"}}
+<table>
+  <thead><tr><th>ID</th><th>Priority</th><th>Instruction</th><th>Source</th><th>Applied</th></tr></thead>
+  <tbody>
+  {{range .Instructions}}
+    <tr>
+      <td>{{.ID}}</td>
+      <td>{{.Priority}}</td>
+      <td>{{.Content}}</td>
+      <td class="muted">{{.Source}}</td>
+      <td>{{if .Applied}}yes{{else}}no{{end}}</td>
+    </tr>
+  {{else}}
+    <tr><td colspan="5" class="muted">No instructions stored yet.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+{{end}}

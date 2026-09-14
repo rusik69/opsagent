@@ -1,0 +1,63 @@
+{{define "memory"}}<!DOCTYPE html>
+<html lang="en">
+{{template "head" .}}
+<body>
+{{template "nav" .}}
+<main>
+<h1>Memory &amp; instructions</h1>
+
+<div class="panel">
+<h2>Memories</h2>
+<table>
+  <thead><tr><th>ID</th><th>Topic</th><th>Content</th><th>Tags</th><th>Created</th></tr></thead>
+  <tbody>
+  {{range .Memories}}
+    <tr>
+      <td>{{.ID}}</td>
+      <td><strong>{{.Topic}}</strong></td>
+      <td class="muted">{{.Content}}</td>
+      <td>{{range .Tags}}<span class="badge info">{{.}}</span> {{end}}</td>
+      <td class="muted">{{.CreatedAt.Format "2006-01-02 15:04"}}</td>
+    </tr>
+  {{else}}
+    <tr><td colspan="5" class="muted">No memories stored yet.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+<form method="post" action="/api/v1/memory" class="row mt">
+  <input class="grow" type="text" name="topic" placeholder="topic (required)">
+  <input class="grow" type="text" name="content" placeholder="content (required)">
+  <input type="text" name="tags" placeholder="tags, comma separated">
+  <button class="btn" type="submit">Store</button>
+</form>
+</div>
+
+<div class="panel">
+<h2>Improvement instructions</h2>
+<table>
+  <thead><tr><th>ID</th><th>Priority</th><th>Instruction</th><th>Source</th><th>Applied</th></tr></thead>
+  <tbody>
+  {{range .Instructions}}
+    <tr>
+      <td>{{.ID}}</td>
+      <td>{{.Priority}}</td>
+      <td>{{.Content}}</td>
+      <td class="muted">{{.Source}}</td>
+      <td>{{if .Applied}}yes{{else}}no{{end}}</td>
+    </tr>
+  {{else}}
+    <tr><td colspan="5" class="muted">No instructions stored yet.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+<form method="post" action="/api/v1/instructions" class="row mt">
+  <input class="grow" type="text" name="content" placeholder="instruction (required)">
+  <input type="number" name="priority" value="5" style="width:90px">
+  <button class="btn" type="submit">Store</button>
+</form>
+</div>
+</main>
+{{template "foot" .}}
+</body>
+</html>
+{{end}}

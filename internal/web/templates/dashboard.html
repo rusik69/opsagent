@@ -1,0 +1,51 @@
+{{define "dashboard"}}<!DOCTYPE html>
+<html lang="en">
+{{template "head" .}}
+<body>
+{{template "nav" .}}
+<main>
+<h1>Dashboard</h1>
+<div class="stats">
+  <div class="stat"><div class="num">{{.Total}}</div><div class="label">Total incidents</div></div>
+  <div class="stat"><div class="num">{{.Open}}</div><div class="label">Open</div></div>
+  <div class="stat"><div class="num">{{.Critical}}</div><div class="label">Critical</div></div>
+  <div class="stat"><div class="num">{{.NeedsReview}}</div><div class="label">Diagnosed, no MR</div></div>
+</div>
+
+<h2>Recent incidents</h2>
+<div class="panel">
+<table>
+  <thead><tr><th>ID</th><th>Status</th><th>Severity</th><th>Host</th><th>Title</th><th>MR / Solution</th><th>Source</th><th>Created</th></tr></thead>
+  <tbody>
+  {{range .Recent}}
+    <tr>
+      <td><a href="/incidents/{{.ID}}">#{{.ID}}</a></td>
+      <td><span class="badge {{.Status}}">{{.Status}}</span></td>
+      <td><span class="badge {{.Severity}}">{{.Severity}}</span></td>
+      <td>{{.Host}}</td>
+      <td>{{.Title}}</td>
+      <td>
+        {{if .MRURL}}<a href="{{.MRURL}}" target="_blank" rel="noopener">MR</a>{{else if .Solution}}<span class="muted" title="{{.Solution}}">{{sliceSolution .Solution}}</span>{{else}}<span class="muted">—</span>{{end}}
+      </td>
+      <td class="muted">{{.Source}}</td>
+      <td class="muted">{{.CreatedAt.Format "2006-01-02 15:04"}}</td>
+    </tr>
+  {{else}}
+    <tr><td colspan="8" class="muted">No incidents yet. POST to /api/v1/incidents to create one.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+</div>
+
+<h2>Quick actions</h2>
+<div class="row">
+  <span class="muted">MCP server available at</span>
+  <code>/mcp</code>
+  <a class="btn small" href="/hosts">Hosts console</a>
+  <a class="btn small" href="/repos">Config repos</a>
+</div>
+</main>
+{{template "foot" .}}
+</body>
+</html>
+{{end}}

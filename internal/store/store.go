@@ -1,0 +1,164 @@
+package store
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
+
+	_ "modernc.org/sqlite"
+)
+
+type Store struct {
+	db *sql.DB
+}
+
+func Open(path string) (*Store, error) {
+	if path == "" {
+		path = "./data/opsagent.db"
+	}
+	if dir := filepath.Dir(path); dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, fmt.Errorf("create storage dir: %w", err)
+		}
+	}
+	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
+	if err != nil {
+		return nil, fmt.Errorf("open db: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	s := &Store{db: db}
+	if err := s.migrate(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return s, nil
+}
+
+func (s *Store) Close() error { return s.db.Close() }
+
+func (s *Store) migrate() error {
+	schema := `
+CREATE TABLE IF NOT EXISTS incidents (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	external_id TEXT NOT NULL DEFAULT '',
+	source TEXT NOT NULL DEFAULT '',
+	host TEXT NOT NULL DEFAULT '',
+	severity TEXT NOT NULL DEFAULT 'info',
+	title TEXT NOT NULL DEFAULT '',
+	message TEXT NOT NULL DEFAULT '',
+	labels_json TEXT NOT NULL DEFAULT '{}',
+	status TEXT NOT NULL DEFAULT 'open',
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_incidents_status ON incidents(status);
+CREATE INDEX IF NOT EXISTS idx_incidents_host ON incidents(host);
+
+CREATE TABLE IF NOT EXISTS diagnoses (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	incident_id INTEGER NOT NULL,
+	status TEXT NOT NULL DEFAULT 'running',
+	report TEXT NOT NULL DEFAULT '',
+	summary TEXT NOT NULL DEFAULT '',
+	steps_json TEXT NOT NULL DEFAULT '[]',
+	logs TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS command_runs (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	incident_id INTEGER,
+	host TEXT NOT NULL DEFAULT '',
+	command_id TEXT NOT NULL DEFAULT '',
+	params_json TEXT NOT NULL DEFAULT '{}',
+	command TEXT NOT NULL DEFAULT '',
+	status TEXT NOT NULL DEFAULT 'pending',
+	stdout TEXT NOT NULL DEFAULT '',
+	stderr TEXT NOT NULL DEFAULT '',
+	duration_ms INTEGER NOT NULL DEFAULT 0,
+	created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_command_runs_incident ON command_runs(incident_id);
+
+CREATE TABLE IF NOT EXISTS memories (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	topic TEXT NOT NULL DEFAULT '',
+	content TEXT NOT NULL DEFAULT '',
+	tags_json TEXT NOT NULL DEFAULT '[]',
+	created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS instructions (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	content TEXT NOT NULL DEFAULT '',
+	priority INTEGER NOT NULL DEFAULT 5,
+	source TEXT NOT NULL DEFAULT '',
+	applied INTEGER NOT NULL DEFAULT 0,
+	created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS incident_groups (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	kind TEXT NOT NULL DEFAULT '',
+	key TEXT NOT NULL DEFAULT '',
+	label TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_groups_key ON incident_groups(kind, key);
+
+CREATE TABLE IF NOT EXISTS incident_group_members (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	group_id INTEGER NOT NULL,
+	incident_id INTEGER NOT NULL,
+	added_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_group_members_uniq ON incident_group_members(group_id, incident_id);
+CREATE INDEX IF NOT EXISTS idx_group_members_incident ON incident_group_members(incident_id);
+
+CREATE TABLE IF NOT EXISTS incident_events (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	incident_id INTEGER NOT NULL,
+	kind TEXT NOT NULL DEFAULT '',
+	detail TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_events_incident ON incident_events(incident_id);
+
+CREATE TABLE IF NOT EXISTS retrospectives (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	window_start TEXT NOT NULL,
+	window_end TEXT NOT NULL,
+	incidents_reviewed INTEGER NOT NULL DEFAULT 0,
+	summary TEXT NOT NULL DEFAULT '',
+	memories_created INTEGER NOT NULL DEFAULT 0,
+	instructions_created INTEGER NOT NULL DEFAULT 0,
+	created_at TEXT NOT NULL
+);
+`
+	if _, err := s.db.Exec(schema); err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
+	// Additive migrations: safe to ignore "duplicate column" errors.
+	_, _ = s.db.Exec(`ALTER TABLE incidents ADD COLUMN solution TEXT NOT NULL DEFAULT ''`)
+	_, _ = s.db.Exec(`ALTER TABLE incidents ADD COLUMN mr_url TEXT NOT NULL DEFAULT ''`)
+	_, _ = s.db.Exec(`ALTER TABLE incidents ADD COLUMN root_cause TEXT NOT NULL DEFAULT ''`)
+	_, _ = s.db.Exec(`ALTER TABLE incidents ADD COLUMN confidence TEXT NOT NULL DEFAULT ''`)
+	_, _ = s.db.Exec(`ALTER TABLE incidents ADD COLUMN resolved_via TEXT NOT NULL DEFAULT ''`)
+	_, _ = s.db.Exec(`ALTER TABLE incidents ADD COLUMN resolved_at TEXT`)
+	return nil
+}
+
+const timeFmt = time.RFC3339Nano
+
+func now() string { return time.Now().UTC().Format(timeFmt) }
+
+func timeParse(s string) time.Time {
+	t, _ := time.Parse(timeFmt, s)
+	return t
+}
+
+func (s *Store) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }

@@ -1,0 +1,73 @@
+{{define "repos"}}<!DOCTYPE html>
+<html lang="en">
+{{template "head" .}}
+<body>
+{{template "nav" .}}
+<main>
+<h1>Configuration repos</h1>
+
+<div class="panel">
+<table>
+  <thead><tr><th>Name</th><th>Type</th><th>Root / URL</th></tr></thead>
+  <tbody>
+  {{range .Repos}}
+    <tr><td>{{.Name}}</td><td><span class="badge info">{{.Type}}</span></td><td class="muted">{{if .URL}}{{.URL}}{{else}}{{.Root}}{{end}}</td></tr>
+  {{else}}
+    <tr><td colspan="3" class="muted">No repos configured.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+<div class="row mt">
+  <button class="btn" type="button" onclick="syncRepos()" id="sync-btn">Sync repos</button>
+  <span class="muted" id="sync-result"></span>
+</div>
+</div>
+
+<h2>Search repos</h2>
+<div class="panel">
+<form id="repo-search" class="row">
+  <input class="grow" type="text" name="q" id="repo-q" placeholder="search query, e.g. a hostname, service, class or role">
+  <select id="repo-scope" style="width:auto">
+    <option value="">all repos</option>
+    <option value="docs">docs only</option>
+  </select>
+  <button class="btn" type="button" onclick="repoSearch()">Search</button>
+</form>
+<div id="repo-results"></div>
+</div>
+
+<script>
+function syncRepos() {
+  const btn = document.getElementById('sync-btn');
+  const res = document.getElementById('sync-result');
+  btn.disabled = true;
+  res.textContent = 'syncing...';
+  fetch('/api/v1/repos/sync', {method: 'POST'})
+    .then(r => r.json())
+    .then(data => { res.textContent = data.result || data.error || 'done'; btn.disabled = false; })
+    .catch(e => { res.textContent = 'error: ' + e; btn.disabled = false; });
+}
+function repoSearch() {
+  const q = document.getElementById('repo-q').value;
+  if (!q) return;
+  const scope = document.getElementById('repo-scope').value;
+  fetch('/api/v1/repos/search?q=' + encodeURIComponent(q) + '&scope=' + scope)
+    .then(r => r.json())
+    .then(matches => {
+      const el = document.getElementById('repo-results');
+      if (!matches.length) { el.innerHTML = '<p class="muted">no matches</p>'; return; }
+      let html = '<table><thead><tr><th>Repo</th><th>File</th><th>Line</th><th>Match</th></tr></thead><tbody>';
+      for (const m of matches) {
+        html += '<tr><td>' + m.repo + '</td><td class="muted">' + m.path + '</td><td>' + m.line + '</td><td class="match-line">' + escapeHtml(m.content) + '</td></tr>';
+      }
+      html += '</tbody></table>';
+      el.innerHTML = html;
+    });
+}
+function escapeHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+</script>
+</main>
+{{template "foot" .}}
+</body>
+</html>
+{{end}}

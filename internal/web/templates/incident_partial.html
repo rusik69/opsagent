@@ -1,0 +1,29 @@
+{{define "incident_partial"}}
+<div class="panel">
+  <div class="row">
+    <h1 class="grow">Incident #{{.Incident.ID}}</h1>
+    <span class="badge {{.Incident.Status}}">{{.Incident.Status}}</span>
+    <span class="badge {{.Incident.Severity}}">{{.Incident.Severity}}</span>
+    {{if .Running}}<span class="spinner" title="diagnosis running"></span>{{end}}
+  </div>
+  <dl class="kv mt">
+    <dt>Host</dt><dd>{{.Incident.Host}}</dd>
+    <dt>Title</dt><dd>{{.Incident.Title}}</dd>
+    <dt>Message</dt><dd>{{.Incident.Message}}</dd>
+    <dt>Source</dt><dd>{{.Incident.Source}}</dd>
+    <dt>Created</dt><dd>{{.Incident.CreatedAt.Format "2006-01-02 15:04:05"}}</dd>
+    {{range $k, $v := .Incident.Labels}}<dt>label: {{$k}}</dt><dd>{{$v}}</dd>{{end}}
+  </dl>
+  <div class="row mt">
+    <form action="/api/v1/incidents/{{.Incident.ID}}/diagnose" method="post">
+      <button class="btn" type="submit">Diagnose</button>
+    </form>
+    <form action="/api/v1/incidents/{{.Incident.ID}}/cancel" method="post">
+      <button class="btn danger" type="submit">Cancel diagnosis</button>
+    </form>
+    <a class="btn small" href="/incidents">Back</a>
+  </div>
+</div>
+
+{{template "diagnosis_block" .}}
+{{end}}

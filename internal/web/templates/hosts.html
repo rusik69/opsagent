@@ -1,0 +1,106 @@
+{{define "hosts"}}<!DOCTYPE html>
+<html lang="en">
+{{template "head" .}}
+<body>
+{{template "nav" .}}
+<main>
+<h1>Hosts</h1>
+
+<h2>Configured hosts</h2>
+<div class="panel">
+<table>
+  <thead><tr><th>Name</th><th>Address</th><th>User</th><th>Port</th></tr></thead>
+  <tbody>
+  {{range .Hosts}}
+    <tr><td>{{.Name}}</td><td>{{.Address}}</td><td>{{.User}}</td><td>{{.Port}}</td></tr>
+  {{else}}
+    <tr><td colspan="4" class="muted">No hosts configured.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+</div>
+
+<h2>Read-only command console</h2>
+<div class="panel">
+  <div class="row">
+    <select id="cmd-host" style="width:auto">
+      {{range .Hosts}}<option value="{{.Name}}">{{.Name}}</option>{{else}}<option value="">no hosts</option>{{end}}
+    </select>
+    <select id="cmd-id" style="width:auto" onchange="renderCmdParams()">
+      {{range .Commands}}<option value="{{.ID}}">{{.ID}} — {{.Description}}</option>{{else}}<option value="">no commands</option>{{end}}
+    </select>
+    <span id="cmd-params" class="row"></span>
+    <button class="btn" type="button" onclick="runCmd()">Run (read-only)</button>
+  </div>
+  <p class="muted mb">Only allowlisted read-only commands may be run. Params are validated server-side.</p>
+  <pre id="cmd-output" class="muted">Select a host and command, then click Run.</pre>
+</div>
+
+<h2>Allowlisted read-only commands</h2>
+<div class="panel">
+<table>
+  <thead><tr><th>ID</th><th>Description</th><th>Command</th></tr></thead>
+  <tbody>
+  {{range .Commands}}
+    <tr>
+      <td><code>{{.ID}}</code></td>
+      <td>{{.Description}}</td>
+      <td><code>{{.Template}}</code></td>
+    </tr>
+  {{else}}
+    <tr><td colspan="3" class="muted">No commands in allowlist.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+</div>
+
+<script>
+const COMMANDS = {{.CommandsJSON}};
+function renderCmdParams() {
+  const el = document.getElementById('cmd-params');
+  const id = document.getElementById('cmd-id').value;
+  const cmd = COMMANDS.find(c => c.id === id);
+  el.innerHTML = '';
+  if (!cmd || !cmd.params) return;
+  const keys = Object.keys(cmd.params);
+  for (const k of keys) {
+    const input = document.createElement('input');
+    input.placeholder = k;
+    input.id = 'param-' + k;
+    input.style.width = '120px';
+    el.appendChild(input);
+  }
+}
+function runCmd() {
+  const host = document.getElementById('cmd-host').value;
+  const id = document.getElementById('cmd-id').value;
+  const cmd = COMMANDS.find(c => c.id === id);
+  const params = {};
+  if (cmd && cmd.params) {
+    for (const k of Object.keys(cmd.params)) {
+      const v = document.getElementById('param-' + k).value;
+      if (v) params[k] = v;
+    }
+  }
+  const out = document.getElementById('cmd-output');
+  out.textContent = 'running...';
+  out.classList.remove('muted');
+  fetch('/api/v1/hosts/' + encodeURIComponent(host) + '/commands/run', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({command_id: id, params: params})
+  }).then(r => r.json()).then(data => {
+    if (data.error) { out.textContent = 'error: ' + data.error; return; }
+    let s = '$ ' + data.command + '\n';
+    if (data.stdout) s += data.stdout + '\n';
+    if (data.stderr) s += '[stderr] ' + data.stderr + '\n';
+    s += '[exit: ' + data.status + ', ' + data.duration_ms + 'ms]';
+    out.textContent = s;
+  }).catch(e => { out.textContent = 'error: ' + e; });
+}
+</script>
+</main>
+{{template "foot" .}}
+</body>
+</html>
+{{end}}

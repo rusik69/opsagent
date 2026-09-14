@@ -1,0 +1,81 @@
+server:
+  listen: ":8080"
+  api_key: ""            # optional; set to require X-API-Key on API calls
+
+storage:
+  path: "./data/opsagent.db"
+
+ssh:
+  timeout_seconds: 15
+  use_agent: true        # use ssh-agent for auth
+  private_key: ""        # optional path to a PEM private key
+  known_hosts: "insecure" # set to a known_hosts file path for strict verification
+  hosts:
+    - name: web-01
+      address: 127.0.0.1
+      user: ops
+      port: 22
+    - name: db-01
+      address: 127.0.0.2
+      user: ops
+      port: 22
+
+# Optional extra allowlisted commands merged with the built-in read-only set.
+# Templates are read-only and must not contain shell metacharacters.
+# Params values are validated against the given regex, never passed to a shell.
+allowlist:
+  commands:
+    - id: apache_status
+      description: "Apache worker status"
+      template: "apachectl status"
+    - id: nginx_conf_test
+      description: "nginx configuration syntax check (read-only)"
+      template: "nginx -t"
+
+repos:
+  - name: ansible-infra
+    type: ansible
+    url: "git@github.com:acme/ansible-infra.git"
+    branch: main
+  - name: puppet-control
+    type: puppet
+    path: "/opt/puppet-control"
+  - name: infra-docs
+    type: docs
+    url: "git@github.com:acme/infra-docs.git"
+    branch: main
+
+gitlab:
+  base_url: "https://gitlab.example.com"
+  token: ""                     # GitLab API token (private-token)
+  default_project_id: ""        # e.g. "acme/ansible-infra" or numeric id
+  source_branch_prefix: "opsagent-fix"
+  target_branch: "main"
+  poll_mr_seconds: 300          # check agent-created MRs for merge (0 = disabled)
+
+agent:
+  instructions_file: "agent-rules.md"  # rules + repo/doc paths injected into every LLM request
+
+correlate:
+  enabled: true
+  window_minutes: 120
+  interval_minutes: 15
+  methods: [host, alertname, label, rootcause]
+
+review:
+  enabled: true
+  interval_hours: 6
+  limit: 50
+  min_incidents: 3
+  max_summary_len: 4000
+
+llm:
+  enabled: true
+  base_url: "http://localhost:11434/v1"   # OpenAI-compatible endpoint
+  api_key: ""
+  model: "llama3.1"
+  max_steps: 12
+  timeout_secs: 180
+
+mcp:
+  expose_http: true      # serve the MCP server over HTTP at /mcp

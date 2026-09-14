@@ -1,0 +1,69 @@
+{{define "incidents"}}<!DOCTYPE html>
+<html lang="en">
+{{template "head" .}}
+<body>
+{{template "nav" .}}
+<main>
+<div class="row mb">
+  <h1 class="grow">Incidents</h1>
+  <form method="get" action="/incidents" class="row">
+    <input type="text" name="q" value="{{.Query}}" placeholder="search host / title / message" style="width:220px">
+    <select name="status">
+      <option value="">all statuses</option>
+      {{range $s := "open diagnosing diagnosed error resolved cancelled" | split}}
+        <option value="{{$s}}" {{if eq $.Status $s}}selected{{end}}>{{$s}}</option>
+      {{end}}
+    </select>
+    <select name="severity">
+      <option value="">all severities</option>
+      {{range $v := "critical warning info" | split}}
+        <option value="{{$v}}" {{if eq $.Severity $v}}selected{{end}}>{{$v}}</option>
+      {{end}}
+    </select>
+    <button class="btn" type="submit">Filter</button>
+    <a class="btn small" href="/incidents">Reset</a>
+  </form>
+</div>
+
+<div class="panel">
+<table>
+  <thead><tr><th>ID</th><th>Investigation</th><th>Severity</th><th>Host</th><th>Title</th><th>MR / Solution</th><th>Created</th><th></th></tr></thead>
+  <tbody>
+  {{range .Incidents}}
+    <tr>
+      <td><a href="/incidents/{{.ID}}">#{{.ID}}</a></td>
+      <td>
+        <span class="badge {{.Status}}">{{.Status}}</span>
+        {{if .MRURL}}<span class="badge resolved" title="MR created">fixed via MR</span>{{end}}
+      </td>
+      <td><span class="badge {{.Severity}}">{{.Severity}}</span></td>
+      <td>{{.Host}}</td>
+      <td>{{.Title}}</td>
+      <td>
+        {{if .MRURL}}<a href="{{.MRURL}}" target="_blank" rel="noopener">MR</a>{{else if .Solution}}<span class="muted" title="{{.Solution}}">{{sliceSolution .Solution}}</span>{{else}}<span class="muted">—</span>{{end}}
+      </td>
+      <td class="muted">{{.CreatedAt.Format "2006-01-02 15:04"}}</td>
+      <td><a class="btn small" href="/incidents/{{.ID}}">Details</a></td>
+    </tr>
+  {{else}}
+    <tr><td colspan="8" class="muted">No incidents found.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+</div>
+
+<div class="panel">
+<h3>Ingest a new incident (generic webhook)</h3>
+<form method="post" action="/api/v1/incidents" class="row">
+  <input class="grow" type="text" name="host" placeholder="host (required)">
+  <input class="grow" type="text" name="title" placeholder="title (required)">
+  <input type="text" name="severity" placeholder="severity">
+  <input type="text" name="message" placeholder="message">
+  <button class="btn" type="submit">Create</button>
+</form>
+</div>
+</main>
+{{template "foot" .}}
+</body>
+</html>
+{{end}}

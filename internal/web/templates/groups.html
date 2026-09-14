@@ -1,0 +1,45 @@
+{{define "groups"}}<!DOCTYPE html>
+<html lang="en">
+{{template "head" .}}
+<body>
+{{template "nav" .}}
+<main>
+<div class="row mb">
+  <h1 class="grow">Correlated incident groups</h1>
+  <button class="btn" type="button" onclick="runCorrelation()">Run correlation now</button>
+  <span class="muted" id="corr-result"></span>
+</div>
+
+<div class="panel">
+<table>
+  <thead><tr><th>ID</th><th>Kind</th><th>Label</th><th>Incidents</th></tr></thead>
+  <tbody>
+  {{range .Groups}}
+    <tr>
+      <td><a href="/api/v1/groups/{{.ID}}">{{.ID}}</a></td>
+      <td><span class="badge info">{{.Kind}}</span></td>
+      <td>{{.Label}}</td>
+      <td>{{.Count}}</td>
+    </tr>
+  {{else}}
+    <tr><td colspan="4" class="muted">No correlation groups yet. Incidents are grouped by host, alertname, label and root cause within a time window.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+</div>
+
+<script>
+function runCorrelation() {
+  const res = document.getElementById('corr-result');
+  res.textContent = 'running...';
+  fetch('/api/v1/correlate/run', {method: 'POST'})
+    .then(r => r.json())
+    .then(d => { res.textContent = d.status || d.error || 'done'; setTimeout(() => location.reload(), 500); })
+    .catch(e => { res.textContent = 'error: ' + e; });
+}
+</script>
+</main>
+{{template "foot" .}}
+</body>
+</html>
+{{end}}

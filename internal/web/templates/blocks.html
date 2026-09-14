@@ -1,0 +1,152 @@
+{{define "diagnosis_block"}}
+{{if .Diagnosis}}
+<div class="panel">
+  <div class="row">
+    <h2 class="grow">Diagnosis <span class="diag-status {{.Diagnosis.Status}}">{{.Diagnosis.Status}}</span></h2>
+    {{if .Running}}<span class="spinner"></span>{{end}}
+  </div>
+  {{if .Diagnosis.Summary}}<p class="muted">{{.Diagnosis.Summary}}</p>{{end}}
+  {{if .Diagnosis.Report}}<pre>{{.Diagnosis.Report}}</pre>{{end}}
+  {{if .Running}}<div class="muted row"><span class="spinner"></span> investigation in progress, polling...</div>{{end}}
+
+  {{if .Diagnosis.Steps}}
+  <details class="mt">
+    <summary>Investigation steps ({{len .Diagnosis.Steps}})</summary>
+    {{range .Diagnosis.Steps}}
+    <div class="panel step">
+      <div class="row">
+        <code class="grow">{{.Tool}}</code>
+        <span class="muted">{{.Timestamp.Format "15:04:05"}}</span>
+      </div>
+      {{if .Input}}<pre class="step-input">{{.Input}}</pre>{{end}}
+      {{if .Output}}<pre class="step-output">{{.Output}}</pre>{{end}}
+    </div>
+    {{end}}
+  </details>
+  {{end}}
+</div>
+{{end}}
+{{end}}
+
+{{define "commands_block"}}
+{{if .CommandRuns}}
+<div class="panel">
+  <h2>Command runs</h2>
+  {{range .CommandRuns}}
+  <details>
+    <summary>{{.CommandID}} on {{.Host}} &mdash; {{.Status}} ({{.DurationMS}}ms)</summary>
+    <pre>{{.Command}}</pre>
+    {{if .Stdout}}<pre>{{.Stdout}}</pre>{{end}}
+    {{if .Stderr}}<pre class="mt"><strong>stderr</strong>
+{{.Stderr}}</pre>{{end}}
+  </details>
+  {{end}}
+</div>
+{{end}}
+{{end}}
+
+{{define "incident_actions"}}
+<div class="row mt">
+  <form hx-post="/api/v1/incidents/{{.Incident.ID}}/diagnose" hx-target="#ir{{.Incident.ID}}" hx-swap="outerHTML">
+    <button class="btn" type="submit" {{if .Running}}disabled{{end}}>Diagnose</button>
+  </form>
+  <form hx-post="/api/v1/incidents/{{.Incident.ID}}/cancel" hx-target="#ir{{.Incident.ID}}" hx-swap="outerHTML">
+    <button class="btn danger" type="submit" {{if not .Running}}disabled{{end}}>Cancel diagnosis</button>
+  </form>
+  <form hx-post="/api/v1/incidents/{{.Incident.ID}}/status" hx-target="#ir{{.Incident.ID}}" hx-swap="outerHTML">
+    <input type="hidden" name="status" value="resolved">
+    <button class="btn small" type="submit" {{if eq .Incident.Status "resolved"}}disabled{{end}}>Mark resolved</button>
+  </form>
+  <a class="btn small" href="/incidents">Back</a>
+</div>
+{{end}}
+
+{{define "incident_body"}}
+<div class="panel">
+  <div class="row">
+    <h1 class="grow">Incident #{{.Incident.ID}}</h1>
+    <span class="badge {{.Incident.Status}}">{{.Incident.Status}}</span>
+    <span class="badge {{.Incident.Severity}}">{{.Incident.Severity}}</span>
+    {{if .Running}}<span class="spinner" title="diagnosis running"></span>{{end}}
+  </div>
+  <dl class="kv mt">
+    <dt>Host</dt><dd>{{.Incident.Host}}</dd>
+    <dt>Title</dt><dd>{{.Incident.Title}}</dd>
+    <dt>Message</dt><dd>{{.Incident.Message}}</dd>
+    <dt>Source</dt><dd>{{.Incident.Source}}</dd>
+    <dt>External ID</dt><dd>{{.Incident.ExternalID}}</dd>
+    <dt>Created</dt><dd>{{.Incident.CreatedAt.Format "2006-01-02 15:04:05"}}</dd>
+    {{range $k, $v := .Incident.Labels}}<dt>label: {{$k}}</dt><dd>{{$v}}</dd>{{end}}
+  </dl>
+  {{template "incident_actions" .}}
+</div>
+
+{{if or .Incident.Solution .Incident.MRURL .Incident.RootCause}}
+<div class="panel">
+  <h2>Solution &amp; MR</h2>
+  {{if .Incident.MRURL}}
+    <p><a class="btn" href="{{.Incident.MRURL}}" target="_blank" rel="noopener">Open merge request</a></p>
+  {{end}}
+  {{if .Incident.RootCause}}<p><strong>Root cause:</strong> {{.Incident.RootCause}}</p>{{end}}
+  {{if .Incident.Confidence}}<p class="muted">Confidence: {{.Incident.Confidence}}</p>{{end}}
+  {{if .Incident.ResolvedVia}}<p class="muted">Resolved via: {{.Incident.ResolvedVia}}</p>{{end}}
+  {{if .Incident.Solution}}<pre>{{.Incident.Solution}}</pre>{{end}}
+</div>
+{{end}}
+
+{{if .Related}}
+<div class="panel">
+  <h2>Correlated incidents</h2>
+  <table>
+    <thead><tr><th>ID</th><th>Status</th><th>Severity</th><th>Host</th><th>Title</th></tr></thead>
+    <tbody>
+    {{range .Related}}
+      <tr>
+        <td><a href="/incidents/{{.ID}}">#{{.ID}}</a></td>
+        <td><span class="badge {{.Status}}">{{.Status}}</span></td>
+        <td><span class="badge {{.Severity}}">{{.Severity}}</span></td>
+        <td>{{.Host}}</td>
+        <td>{{.Title}}</td>
+      </tr>
+    {{else}}
+      <tr><td colspan="5" class="muted">No related incidents.</td></tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{range .Groups}}<span class="badge info">{{.Label}}</span> {{end}}
+</div>
+{{end}}
+
+{{if .Events}}
+<div class="panel">
+  <h2>Timeline</h2>
+  <table>
+    <thead><tr><th>When</th><th>Event</th><th>Detail</th></tr></thead>
+    <tbody>
+    {{range .Events}}
+      <tr>
+        <td class="muted">{{.CreatedAt.Format "2006-01-02 15:04:05"}}</td>
+        <td><span class="badge {{.Kind}}">{{.Kind}}</span></td>
+        <td>{{.Detail}}</td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+</div>
+{{end}}
+
+{{template "diagnosis_block" .}}
+{{template "commands_block" .}}
+{{end}}
+
+{{define "incident_root"}}
+<div id="ir{{.Incident.ID}}" class="incident-root">
+  {{if .Running}}
+  <div hx-get="/partials/incident/{{.Incident.ID}}" hx-trigger="every 2s" hx-swap="outerHTML">
+    {{template "incident_body" .}}
+  </div>
+  {{else}}
+  {{template "incident_body" .}}
+  {{end}}
+</div>
+{{end}}

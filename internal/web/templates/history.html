@@ -1,0 +1,45 @@
+{{define "history"}}<!DOCTYPE html>
+<html lang="en">
+{{template "head" .}}
+<body>
+{{template "nav" .}}
+<main>
+<div class="row mb">
+  <h1 class="grow">Incident history &amp; retrospectives</h1>
+  <button class="btn" type="button" onclick="runReview()">Run review now</button>
+  <span class="muted" id="review-result"></span>
+</div>
+
+{{range .Retrospectives}}
+<div class="panel">
+  <div class="row">
+    <h2 class="grow">Retrospective #{{.ID}}</h2>
+    <span class="muted">{{.CreatedAt.Format "2006-01-02 15:04"}}</span>
+  </div>
+  <p class="muted">Window: {{.WindowStart.Format "2006-01-02 15:04"}} → {{.WindowEnd.Format "2006-01-02 15:04"}} · {{.IncidentsReviewd}} incidents reviewed · {{.MemoriesCreated}} memories · {{.InstructionsCreated}} instructions</p>
+  <pre>{{.Summary}}</pre>
+</div>
+{{else}}
+<div class="panel">
+  <p class="muted">No retrospectives yet. The review runs periodically (and on demand) over completed incidents and stores what it learns as memories and instructions.</p>
+</div>
+{{end}}
+
+<script>
+function runReview() {
+  const res = document.getElementById('review-result');
+  res.textContent = 'running...';
+  fetch('/api/v1/review/run', {method: 'POST'})
+    .then(r => r.json())
+    .then(d => {
+      if (d.status === 'done') { res.textContent = 'done — ' + d.retrospective.summary.length + ' chars'; setTimeout(() => location.reload(), 600); }
+      else { res.textContent = d.reason || d.error || d.status; }
+    })
+    .catch(e => { res.textContent = 'error: ' + e; });
+}
+</script>
+</main>
+{{template "foot" .}}
+</body>
+</html>
+{{end}}
