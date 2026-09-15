@@ -197,8 +197,12 @@ func (e *Engine) groupBy(ctx context.Context, kind string, incs []*model.Inciden
 			return err
 		}
 		for _, id := range ids {
-			if _, err := e.store.AddIncidentToGroup(ctx, g.ID, id); err != nil {
+			added, err := e.store.AddIncidentToGroup(ctx, g.ID, id)
+			if err != nil {
 				return err
+			}
+			if added {
+				_, _ = e.store.AddEvent(ctx, id, model.EventCorrelated, labels[key])
 			}
 		}
 	}

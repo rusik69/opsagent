@@ -27,7 +27,7 @@ func fakeGitLab(t *testing.T) (*Client, *[]string, *sync.Mutex) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusCreated)
 			_, _ = w.Write([]byte(`{"name":"opsagent-fix-bump-nginx"}`))
-		case r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/repository/files/"):
+		case (r.Method == http.MethodPost || r.Method == http.MethodPut) && strings.Contains(r.URL.Path, "/repository/files/"):
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"file_path":"host_vars/web-01.yml","branch":"opsagent-fix-bump-nginx"}`))
@@ -90,6 +90,61 @@ func TestUpsertFileSendsJSON(t *testing.T) {
 		t.Fatalf("UpsertFile: %v", err)
 	}
 	_ = calls
+}
+
+// TestUpsertFileFallsBackToPut verifies that when GitLab rejects the POST
+// (file already exists), the client retries the write with PUT.
+func TestUpsertFileFallsBackToPut(t *testing.T) {
+	var mu sync.Mutex
+	var calls []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls = append(calls, r.Method+" "+r.URL.Path)
+		mu.Unlock()
+		switch {
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/repository/files/"):
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"message":"A file with this name already exists"}`))
+		case r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/repository/files/"):
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"file_path":"a"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "tok")
+	if err := c.UpsertFile(context.Background(), "acme/infra", "b", "a.yml", "content", "msg"); err != nil {
+		t.Fatalf("UpsertFile: %v", err)
+	}
+	if len(calls) != 2 || !strings.Contains(calls[0], "POST") || !strings.Contains(calls[1], "PUT") {
+		t.Fatalf("expected POST then PUT, got %v", calls)
+	}
+}
+
+// TestUpsertFileDoesNotFallbackOnAuthError verifies that transport/authorization
+// failures do not trigger a pointless PUT retry.
+func TestUpsertFileDoesNotFallbackOnAuthError(t *testing.T) {
+	var mu sync.Mutex
+	var calls []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls = append(calls, r.Method+" "+r.URL.Path)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"message":"401 Unauthorized"}`))
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "bad-token")
+	if err := c.UpsertFile(context.Background(), "acme/infra", "b", "a.yml", "content", "msg"); err == nil {
+		t.Fatal("expected auth error")
+	}
+	if len(calls) != 1 {
+		t.Fatalf("expected exactly 1 call (no PUT fallback), got %v", calls)
+	}
 }
 
 func TestCreateBranchSkipsExisting(t *testing.T) {

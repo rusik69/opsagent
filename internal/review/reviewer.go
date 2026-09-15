@@ -2,7 +2,6 @@ package review
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -97,7 +96,7 @@ func (r *Reviewer) Run(ctx context.Context) (*model.Retrospective, error) {
 			break
 		}
 		for _, tc := range msg.ToolCalls {
-			args := parseToolArgs(tc.Func.Args)
+			args := agent.ParseToolArgs(tc.Func.Args)
 			switch tc.Func.Name {
 			case "store_memory":
 				topic := str(args, "topic")
@@ -166,25 +165,6 @@ func (r *Reviewer) buildHistory(ctx context.Context, incs []*model.Incident) str
 	}
 	return sb.String()
 }
-
-func parseToolArgs(raw json.RawMessage) map[string]any {
-	if len(raw) == 0 {
-		return map[string]any{}
-	}
-	var args map[string]any
-	if err := json.Unmarshal(raw, &args); err == nil {
-		return args
-	}
-	var s string
-	if err := json.Unmarshal(raw, &s); err == nil {
-		_ = json.Unmarshal([]byte(s), &args)
-	}
-	if args == nil {
-		args = map[string]any{}
-	}
-	return args
-}
-
 func str(args map[string]any, key string) string {
 	if v, ok := args[key].(string); ok {
 		return v

@@ -152,3 +152,20 @@ func TestCorrelateIncidentSingle(t *testing.T) {
 		t.Fatalf("expected a correlated with b, got %v", related)
 	}
 }
+
+func TestAutoCorrelationEmitsEvents(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	a := newIncident(t, s, "web-01", "a", "", map[string]string{}, "")
+	b := newIncident(t, s, "web-01", "b", "", map[string]string{}, "")
+
+	e := NewEngine(s, Config{Window: 2 * time.Hour, Methods: []string{model.GroupHost}})
+	if err := e.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	hasA, _ := s.HasEvent(ctx, a.ID, model.EventCorrelated)
+	hasB, _ := s.HasEvent(ctx, b.ID, model.EventCorrelated)
+	if !hasA || !hasB {
+		t.Fatalf("expected correlated events on both incidents (a=%v b=%v)", hasA, hasB)
+	}
+}

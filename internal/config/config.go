@@ -90,6 +90,9 @@ type AgentConfig struct {
 	// InstructionsFile is a file (e.g. AGENTS.md) with rules and paths that is
 	// injected into every LLM request together with the repos/docs layout.
 	InstructionsFile string `yaml:"instructions_file"`
+	// MaxConcurrent bounds how many diagnoses may run at once across the whole
+	// server. Excess requests return 429 instead of starting another LLM loop.
+	MaxConcurrent int `yaml:"max_concurrent"`
 }
 
 // CorrelateConfig controls incident correlation.
@@ -129,7 +132,7 @@ func Default() *Config {
 			TimeoutSecs: 180,
 			Enabled:     true,
 		},
-		Agent: AgentConfig{InstructionsFile: "agent-rules.md"},
+		Agent: AgentConfig{InstructionsFile: "agent-rules.md", MaxConcurrent: 4},
 		Correlate: CorrelateConfig{
 			Enabled: true, WindowMinutes: 120, IntervalMinutes: 15,
 			Methods: []string{"host", "alertname", "label", "rootcause"},

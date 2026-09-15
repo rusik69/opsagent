@@ -140,8 +140,7 @@ func (s *Server) handleGroupsPage(w http.ResponseWriter, r *http.Request) {
 	}
 	views := []groupView{}
 	for _, g := range groups {
-		members, _ := s.store.GroupMemberIDs(r.Context(), g.ID)
-		views = append(views, groupView{ID: g.ID, Kind: g.Kind, Label: g.Label, Count: len(members)})
+		views = append(views, groupView{ID: g.ID, Kind: g.Kind, Label: g.Label, Count: g.MemberCount})
 	}
 	s.render(w, "groups", map[string]any{"Groups": views})
 }

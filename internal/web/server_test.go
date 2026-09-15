@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -749,5 +750,141 @@ func TestGroupsPageRenders(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("groups page: %d", resp.StatusCode)
+	}
+}
+
+func TestHealthzExemptFromAPIKey(t *testing.T) {
+	cfg := config.Default()
+	cfg.Server.Listen = ":0"
+	cfg.Server.APIKey = "secret-key"
+	cfg.LLM.Enabled = false
+
+	st, _ := store.Open(t.TempDir() + "/auth.db")
+	defer st.Close()
+	al, _ := sshx.NewAllowlist(sshx.DefaultAllowlist())
+	executor := sshx.NewExecutor(al, &sshx.FakeRunner{}, st)
+	resolver := sshx.HostsFromTargets(nil)
+	rm, _ := repos.NewManager(nil, t.TempDir())
+	mcpSrv, _ := mcp.NewServer("t", "0", mcp.Deps{Executor: executor, Repos: rm, Store: st, Resolver: resolver})
+	ag := agent.New(agent.NewClient("http://127.0.0.1:1/v1", "", "m"), mcpSrv, st, agent.Options{})
+	ws, err := New(cfg, st, executor, resolver, rm, mcpSrv, ag, incidents.NewService(st), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(ws.Handler())
+	defer ts.Close()
+
+	// Liveness probe must work without credentials even when an API key is set.
+	resp, err := http.Get(ts.URL + "/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for healthz without key, got %d", resp.StatusCode)
+	}
+	// The protected API still requires the key.
+	resp2, err := http.Get(ts.URL + "/api/v1/incidents")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for API without key, got %d", resp2.StatusCode)
+	}
+}
+
+func TestDiagnosisConcurrencyLimit(t *testing.T) {
+	// A blocking LLM holds the single diagnosis slot open until released.
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseNow := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseNow()
+	llm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}]}`))
+	}))
+	defer llm.Close()
+
+	cfg := config.Default()
+	cfg.Server.Listen = ":0"
+	cfg.LLM.Enabled = true
+	cfg.LLM.BaseURL = llm.URL + "/v1"
+	cfg.LLM.Model = "test"
+	cfg.LLM.MaxSteps = 1
+	cfg.Agent.MaxConcurrent = 1
+
+	st, _ := store.Open(t.TempDir() + "/diag.db")
+	defer st.Close()
+	al, _ := sshx.NewAllowlist(sshx.DefaultAllowlist())
+	executor := sshx.NewExecutor(al, &sshx.FakeRunner{}, st)
+	resolver := sshx.HostsFromTargets(nil)
+	rm, _ := repos.NewManager(nil, t.TempDir())
+	mcpSrv, _ := mcp.NewServer("t", "0", mcp.Deps{Executor: executor, Repos: rm, Store: st, Resolver: resolver})
+	ag := agent.New(agent.NewClient(cfg.LLM.BaseURL, "", cfg.LLM.Model), mcpSrv, st, agent.Options{MaxSteps: 1})
+	inc := incidents.NewService(st)
+	ws, err := New(cfg, st, executor, resolver, rm, mcpSrv, ag, inc, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(ws.Handler())
+	defer ts.Close()
+
+	create := func(host string) int64 {
+		resp, err := http.Post(ts.URL+"/api/v1/incidents", "application/json",
+			strings.NewReader(fmt.Sprintf(`{"host":%q,"title":"cpu","severity":"warning"}`, host)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var out struct {
+			ID int64 `json:"id"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&out)
+		return out.ID
+	}
+
+	id1 := create("web-01")
+	id2 := create("web-02")
+
+	// First diagnosis occupies the single slot.
+	r1, err := http.Post(ts.URL+fmt.Sprintf("/api/v1/incidents/%d/diagnose", id1), "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r1.Body.Close()
+	if r1.StatusCode != http.StatusAccepted {
+		t.Fatalf("first diagnose: %d", r1.StatusCode)
+	}
+	// Wait until the slot is actually taken.
+	time.Sleep(50 * time.Millisecond)
+
+	// Second diagnosis must be rejected with 429.
+	r2, err := http.Post(ts.URL+fmt.Sprintf("/api/v1/incidents/%d/diagnose", id2), "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r2.Body.Close()
+	if r2.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 for second diagnose, got %d", r2.StatusCode)
+	}
+
+	// Release the slot; a retry now succeeds.
+	releaseNow()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		r3, err := http.Post(ts.URL+fmt.Sprintf("/api/v1/incidents/%d/diagnose", id2), "application/json", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r3.Body.Close()
+		if r3.StatusCode == http.StatusAccepted {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("diagnosis did not become available again: %d", r3.StatusCode)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }

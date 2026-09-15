@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -132,5 +133,37 @@ func TestFindResolvedIncidentByExternal(t *testing.T) {
 	missing, err := s.FindResolvedIncidentByExternal(ctx, "alertmanager", "Nope", "web-01")
 	if err != nil || missing != nil {
 		t.Fatalf("expected nil for missing: %v %+v", err, missing)
+	}
+}
+
+func TestGetOrCreateGroupConcurrent(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+	const n = 16
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			g, err := s.GetOrCreateGroup(ctx, model.GroupHost, "host:web-01:2026010112", "burst")
+			if err == nil && g.ID == 0 {
+				err = fmt.Errorf("group returned without id")
+			}
+			errs <- err
+		}()
+	}
+	for i := 0; i < n; i++ {
+		if err := <-errs; err != nil {
+			t.Fatalf("concurrent GetOrCreateGroup: %v", err)
+		}
+	}
+	// All concurrent callers must observe the same single group id.
+	groups, err := s.ListGroups(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) > 1 {
+		t.Fatalf("expected at most 1 group, got %d", len(groups))
+	}
+	if len(groups) == 1 && groups[0].MemberCount != 0 {
+		t.Fatalf("expected 0 members for fresh group, got %d", groups[0].MemberCount)
 	}
 }

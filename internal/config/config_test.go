@@ -128,3 +128,25 @@ func TestLoadInvalidYAML(t *testing.T) {
 		t.Fatal("expected parse error for invalid yaml")
 	}
 }
+
+func TestAgentMaxConcurrentDefault(t *testing.T) {
+	cfg := Default()
+	if cfg.Agent.MaxConcurrent <= 0 {
+		t.Errorf("expected a positive default max_concurrent, got %d", cfg.Agent.MaxConcurrent)
+	}
+}
+
+func TestLoadParsesMaxConcurrent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	content := "agent:\n  instructions_file: /tmp/rules.md\n  max_concurrent: 7\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Agent.MaxConcurrent != 7 {
+		t.Errorf("expected max_concurrent 7, got %d", cfg.Agent.MaxConcurrent)
+	}
+}

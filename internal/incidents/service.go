@@ -14,6 +14,10 @@ type Service struct {
 	store *store.Store
 }
 
+// maxAlertsPerPayload bounds the number of alerts ingested from a single
+// Alertmanager webhook to protect the store from oversized bursts.
+const maxAlertsPerPayload = 500
+
 func NewService(st *store.Store) *Service { return &Service{store: st} }
 
 type GenericIncident struct {
@@ -108,6 +112,11 @@ type Alertmanager struct {
 // incident per firing alert. Host is derived from labels (host/hostname/instance).
 func (s *Service) CreateAlertmanager(ctx context.Context, payload AlertmanagerPayload) ([]*model.Incident, error) {
 	created := []*model.Incident{}
+	// Cap the number of alerts ingested per payload to bound work; excess
+	// alerts are dropped (they will be re-delivered by Alertmanager).
+	if len(payload.Alerts) > maxAlertsPerPayload {
+		payload.Alerts = payload.Alerts[:maxAlertsPerPayload]
+	}
 	for _, a := range payload.Alerts {
 		if a.Status == "resolved" || payload.Status == "resolved" {
 			continue
@@ -143,6 +152,8 @@ func (s *Service) CreateAlertmanager(ctx context.Context, payload AlertmanagerPa
 		if err != nil {
 			return created, fmt.Errorf("create incident from alertmanager: %w", err)
 		}
+		_, _ = s.store.AddEvent(ctx, createdInc.ID, model.EventCreated, fmt.Sprintf("%s: %s", createdInc.Host, createdInc.Title))
+		s.detectRecurrence(ctx, createdInc)
 		created = append(created, createdInc)
 	}
 	return created, nil

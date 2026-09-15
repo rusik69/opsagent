@@ -145,21 +145,47 @@ func (c *Client) BranchExists(ctx context.Context, projectID, branch string) (bo
 	return out.Name != "", nil
 }
 
-// UpsertFile writes content to path on branch with a commit message.
+// UpsertFile writes content to path on branch with a commit message. GitLab
+// uses POST to create a new file and PUT to update an existing one; we try
+// POST first (the common case for a fresh fix branch) and fall back to PUT if
+// the file already exists.
 func (c *Client) UpsertFile(ctx context.Context, projectID, branch, path, content, commitMsg string) error {
 	if !c.enabled() {
 		return fmt.Errorf("gitlab is not configured (base_url and token required)")
 	}
-	err := c.do(ctx, http.MethodPut, "/projects/"+c.escProject(projectID)+"/repository/files/"+url.PathEscape(path),
-		map[string]string{
-			"branch":         branch,
-			"content":        content,
-			"commit_message": commitMsg,
-		}, nil)
-	if err != nil {
+	fileURL := "/projects/" + c.escProject(projectID) + "/repository/files/" + url.PathEscape(path)
+	body := map[string]string{
+		"branch":         branch,
+		"content":        content,
+		"commit_message": commitMsg,
+	}
+	err := c.do(ctx, http.MethodPost, fileURL, body, nil)
+	if err == nil {
+		return nil
+	}
+	if !isGitLabErrorCode(err, http.StatusBadRequest, http.StatusNotFound) {
+		return fmt.Errorf("write file %s: %w", path, err)
+	}
+	if err := c.do(ctx, http.MethodPut, fileURL, body, nil); err != nil {
 		return fmt.Errorf("write file %s: %w", path, err)
 	}
 	return nil
+}
+
+// isGitLabErrorCode reports whether err was a GitLab API error with one of the
+// given HTTP status codes. It is used to distinguish "file already exists"
+// (BadRequest) from transport or authorization failures that must not trigger
+// a PUT retry.
+func isGitLabErrorCode(err error, codes ...int) bool {
+	if err == nil {
+		return false
+	}
+	for _, code := range codes {
+		if strings.Contains(err.Error(), fmt.Sprintf("%d:", code)) {
+			return true
+		}
+	}
+	return false
 }
 
 // CreateMR opens a merge request from source to target.

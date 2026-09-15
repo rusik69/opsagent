@@ -183,3 +183,56 @@ func TestSeverityNormalization(t *testing.T) {
 		}
 	}
 }
+
+func TestAlertmanagerRecordsEventsAndRecurrence(t *testing.T) {
+	st := openTestStore(t)
+	svc := NewService(st)
+	ctx := context.Background()
+
+	first, err := svc.CreateAlertmanager(ctx, AlertmanagerPayload{
+		Status: "firing",
+		Alerts: []Alertmanager{{Status: "firing", Labels: map[string]string{"alertname": "HighCPU", "host": "web-01"}}},
+	})
+	if err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	if len(first) != 1 {
+		t.Fatalf("expected 1 incident, got %d", len(first))
+	}
+	// Every created incident gets a 'created' event like the generic path.
+	has, _ := st.HasEvent(ctx, first[0].ID, "created")
+	if !has {
+		t.Fatal("expected created event on alertmanager incident")
+	}
+	// Resolve it, then let the same alert fire again -> recurrence detected.
+	if err := st.MarkResolved(ctx, first[0].ID, "mr_merged"); err != nil {
+		t.Fatal(err)
+	}
+	second, err := svc.CreateAlertmanager(ctx, AlertmanagerPayload{
+		Status: "firing",
+		Alerts: []Alertmanager{{Status: "firing", Labels: map[string]string{"alertname": "HighCPU", "host": "web-01"}}},
+	})
+	if err != nil {
+		t.Fatalf("second: %v", err)
+	}
+	has, _ = st.HasEvent(ctx, second[0].ID, "recurrence")
+	if !has {
+		t.Fatal("expected recurrence event on re-fired alertmanager alert")
+	}
+}
+
+func TestAlertmanagerPayloadCap(t *testing.T) {
+	st := openTestStore(t)
+	svc := NewService(st)
+	alerts := make([]Alertmanager, 0, maxAlertsPerPayload+10)
+	for i := 0; i < maxAlertsPerPayload+10; i++ {
+		alerts = append(alerts, Alertmanager{Status: "firing", Labels: map[string]string{"alertname": "A", "host": "h1"}})
+	}
+	created, err := svc.CreateAlertmanager(context.Background(), AlertmanagerPayload{Status: "firing", Alerts: alerts})
+	if err != nil {
+		t.Fatalf("CreateAlertmanager: %v", err)
+	}
+	if len(created) != maxAlertsPerPayload {
+		t.Fatalf("expected %d incidents (capped), got %d", maxAlertsPerPayload, len(created))
+	}
+}

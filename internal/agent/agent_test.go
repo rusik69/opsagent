@@ -315,3 +315,26 @@ func TestDiagnoseLLMError(t *testing.T) {
 		t.Fatalf("expected incident status error, got %+v", gotInc)
 	}
 }
+
+func TestTruncateOutput(t *testing.T) {
+	short := "hello"
+	if got := truncateOutput(short, 100); got != short {
+		t.Fatalf("expected short passthrough, got %q", got)
+	}
+	long := "abcdefghijklmnopqrstuvwxyz"
+	got := truncateOutput(long, 10)
+	if len(got) > 10+len("…[truncated]") {
+		t.Fatalf("truncated output too long: %q", got)
+	}
+	if got != "abcdefghij…[truncated]" {
+		t.Fatalf("unexpected truncated output: %q", got)
+	}
+	if got := truncateOutput(long, 0); got != long {
+		t.Fatalf("max<=0 should pass through, got %q", got)
+	}
+	// Multi-byte output must not be split mid-rune.
+	emoji := "🎉🎉🎉🎉🎉"
+	if got := truncateOutput(emoji, 3); len([]rune(got)) > 3+len("…[truncated]") {
+		t.Fatalf("rune split: %q", got)
+	}
+}

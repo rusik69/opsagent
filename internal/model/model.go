@@ -81,6 +81,8 @@ type IncidentGroup struct {
 	Key       string    `json:"key"`
 	Label     string    `json:"label"`
 	CreatedAt time.Time `json:"created_at"`
+	// MemberCount is populated by list queries (not stored).
+	MemberCount int `json:"member_count"`
 	// IncidentIDs is populated by list queries (not stored).
 	IncidentIDs []int64 `json:"incident_ids,omitempty"`
 }

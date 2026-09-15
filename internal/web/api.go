@@ -16,6 +16,7 @@ import (
 func (s *Server) handleAPICreateIncident(w http.ResponseWriter, r *http.Request) {
 	var g incidents.GenericIncident
 	if r.Header.Get("Content-Type") == "application/x-www-form-urlencoded" {
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		if err := r.ParseForm(); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
@@ -125,13 +126,23 @@ func (s *Server) handleAPIDiagnose(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "LLM agent is disabled in config"})
 		return
 	}
+	// Global concurrency limit: avoid starting an unbounded number of LLM
+	// loops under a burst of alert notifications.
+	select {
+	case s.diagSem <- struct{}{}:
+	default:
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many concurrent diagnoses"})
+		return
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	if !s.pool.Start(inc.ID, cancel) {
 		cancel()
+		<-s.diagSem
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "diagnosis already running for this incident"})
 		return
 	}
 	go func() {
+		defer func() { <-s.diagSem }()
 		defer s.pool.Stop(inc.ID)
 		_, _ = s.agent.Diagnose(ctx, inc)
 	}()
@@ -168,16 +179,24 @@ func (s *Server) handleAPIUpdateStatus(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("invalid status %q", req.Status)})
 		return
 	}
-	if err := s.store.UpdateIncidentStatus(r.Context(), inc.ID, req.Status); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
 	switch req.Status {
 	case model.IncidentResolved:
-		_ = s.store.MarkResolved(r.Context(), inc.ID, "manual")
+		if err := s.store.MarkResolved(r.Context(), inc.ID, "manual"); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
 		_, _ = s.store.AddEvent(r.Context(), inc.ID, model.EventResolved, "resolved manually by operator")
 	case model.IncidentCancelled:
+		if err := s.store.UpdateIncidentStatus(r.Context(), inc.ID, req.Status); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
 		_, _ = s.store.AddEvent(r.Context(), inc.ID, model.EventCancelled, "cancelled by operator")
+	default:
+		if err := s.store.UpdateIncidentStatus(r.Context(), inc.ID, req.Status); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
 	}
 	if isHTMX(r) {
 		s.renderIncidentPartial(w, r, inc)
@@ -412,7 +431,7 @@ func (s *Server) handleAPIGroups(w http.ResponseWriter, r *http.Request) {
 		members, _ := s.store.GroupMemberIDs(r.Context(), g.ID)
 		out = append(out, map[string]any{
 			"id": g.ID, "kind": g.Kind, "key": g.Key, "label": g.Label,
-			"created_at": g.CreatedAt, "incident_ids": members, "member_count": len(members),
+			"created_at": g.CreatedAt, "incident_ids": members, "member_count": g.MemberCount,
 		})
 	}
 	writeJSON(w, http.StatusOK, out)

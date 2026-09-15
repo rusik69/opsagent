@@ -9,27 +9,23 @@ import (
 )
 
 // GetOrCreateGroup returns the group for (kind, key), creating it if missing.
+// It is race-safe: a concurrent create of the same (kind, key) is resolved by
+// the unique index plus INSERT OR IGNORE, after which the row is re-read.
 func (s *Store) GetOrCreateGroup(ctx context.Context, kind, key, label string) (*model.IncidentGroup, error) {
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT OR IGNORE INTO incident_groups (kind, key, label, created_at) VALUES (?, ?, ?, ?)`,
+		kind, key, label, now()); err != nil {
+		return nil, fmt.Errorf("create group: %w", err)
+	}
 	row := s.db.QueryRowContext(ctx,
 		`SELECT id, kind, key, label, created_at FROM incident_groups WHERE kind = ? AND key = ?`, kind, key)
 	var g model.IncidentGroup
 	var createdAt string
-	err := row.Scan(&g.ID, &g.Kind, &g.Key, &g.Label, &createdAt)
-	if err == nil {
-		g.CreatedAt = timeParse(createdAt)
-		return &g, nil
-	}
-	if err != sql.ErrNoRows {
+	if err := row.Scan(&g.ID, &g.Kind, &g.Key, &g.Label, &createdAt); err != nil {
 		return nil, err
 	}
-	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO incident_groups (kind, key, label, created_at) VALUES (?, ?, ?, ?)`,
-		kind, key, label, now())
-	if err != nil {
-		return nil, fmt.Errorf("create group: %w", err)
-	}
-	id, _ := res.LastInsertId()
-	return &model.IncidentGroup{ID: id, Kind: kind, Key: key, Label: label, CreatedAt: timeParse(now())}, nil
+	g.CreatedAt = timeParse(createdAt)
+	return &g, nil
 }
 
 // AddIncidentToGroup links an incident to a group (idempotent).
@@ -130,7 +126,7 @@ func scanGroups(rows *sql.Rows) ([]*model.IncidentGroup, error) {
 			return nil, fmt.Errorf("scan group: %w", err)
 		}
 		g.CreatedAt = timeParse(createdAt)
-		_ = count
+		g.MemberCount = count
 		out = append(out, &g)
 	}
 	return out, rows.Err()

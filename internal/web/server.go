@@ -40,12 +40,18 @@ type Server struct {
 	reviewer  *review.Reviewer
 	tmpl      *template.Template
 	mux       *http.ServeMux
+	// diagSem bounds the number of simultaneous diagnoses server-wide.
+	diagSem chan struct{}
 }
 
 // SetReviewer registers the self-improvement reviewer.
 func (s *Server) SetReviewer(rv *review.Reviewer) { s.reviewer = rv }
 
 func New(cfg *config.Config, st *store.Store, ex *sshx.Executor, resolver sshx.HostResolver, reposMgr *repos.Manager, mcpSrv *mcp.Server, ag *agent.Agent, inc *incidents.Service, corr *correlate.Engine) (*Server, error) {
+	maxConcurrent := cfg.Agent.MaxConcurrent
+	if maxConcurrent <= 0 {
+		maxConcurrent = 4
+	}
 	tmpl, err := template.New("").Funcs(template.FuncMap{
 		"split":         strings.Fields,
 		"sliceSolution": sliceSolution,
@@ -66,6 +72,7 @@ func New(cfg *config.Config, st *store.Store, ex *sshx.Executor, resolver sshx.H
 		correlate: corr,
 		tmpl:      tmpl,
 		mux:       http.NewServeMux(),
+		diagSem:   make(chan struct{}, maxConcurrent),
 	}
 	s.routes()
 	return s, nil
@@ -160,6 +167,11 @@ func (s *Server) apiKeyMiddleware(next http.Handler) http.Handler {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Liveness probes must work without credentials.
+		if r.URL.Path == "/healthz" {
+			next.ServeHTTP(w, r)
+			return
+		}
 		key := r.Header.Get("X-API-Key")
 		if key == "" {
 			if c, err := r.Cookie("api_key"); err == nil {

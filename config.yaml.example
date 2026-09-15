@@ -55,6 +55,7 @@ gitlab:
 
 agent:
   instructions_file: "agent-rules.md"  # rules + repo/doc paths injected into every LLM request
+  max_concurrent: 4                     # max simultaneous diagnoses (excess requests get 429)
 
 correlate:
   enabled: true

@@ -186,8 +186,16 @@ func (c *SSHClient) runOnce(ctx context.Context, host, command string) (Result, 
 	}
 	dur := time.Since(start)
 	result := Result{Stdout: stdout.String(), Stderr: stderr.String(), DurationMS: dur.Milliseconds()}
-	if err != nil && result.Stdout == "" {
-		if ee, ok := err.(*ssh.ExitError); ok {
+	return runResult(result, err)
+}
+
+// runResult finalizes a command result: any non-nil error (including a
+// non-zero exit) is always returned to the caller, even when the command also
+// produced stdout. This ensures failed commands are never reported as
+// successful.
+func runResult(result Result, err error) (Result, error) {
+	if err != nil {
+		if ee, ok := err.(interface{ ExitStatus() int }); ok {
 			return result, fmt.Errorf("command exited with %d", ee.ExitStatus())
 		}
 		return result, err

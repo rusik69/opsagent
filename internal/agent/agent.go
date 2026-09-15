@@ -105,7 +105,7 @@ func (a *Agent) Diagnose(ctx context.Context, incident *model.Incident) (*model.
 
 		runCtx := mcp.WithIncident(ctx, incident.ID)
 		for _, tc := range msg.ToolCalls {
-			args := parseToolArgs(tc.Func.Args)
+			args := ParseToolArgs(tc.Func.Args)
 			res, err := a.mcp.Call(runCtx, tc.Func.Name, args)
 			output := ""
 			if err != nil {
@@ -116,12 +116,13 @@ func (a *Agent) Diagnose(ctx context.Context, incident *model.Incident) (*model.
 					output = "tool error: " + output
 				}
 			}
+			output = truncateOutput(output, maxToolOutput)
 			messages = append(messages, Message{
 				Role:       "tool",
 				ToolCallID: tc.ID,
 				Content:    output,
 			})
-			a.appendStep(d, step, tc.Func.Name, string(tc.Func.Args), output)
+			a.appendStep(d, step, tc.Func.Name, truncateOutput(string(tc.Func.Args), maxToolInput), output)
 		}
 	}
 }
@@ -170,7 +171,7 @@ func (a *Agent) maybeReflect(ctx context.Context, incident *model.Incident, d *m
 		if tc.Func.Name != "store_memory" && tc.Func.Name != "store_instruction" {
 			continue
 		}
-		_, _ = a.mcp.Call(runCtx, tc.Func.Name, parseToolArgs(tc.Func.Args))
+		_, _ = a.mcp.Call(runCtx, tc.Func.Name, ParseToolArgs(tc.Func.Args))
 	}
 }
 
@@ -183,10 +184,11 @@ func textContent(content []mcpsdk.Content) string {
 	return fmt.Sprintf("%v", content)
 }
 
-// parseToolArgs converts a tool call's arguments field into a map. OpenAI
+// ParseToolArgs converts a tool call's arguments field into a map. OpenAI
 // sends arguments as a JSON-encoded string (e.g. "{\"host\":\"web-01\"}");
-// some providers send an object. Both forms are handled.
-func parseToolArgs(raw json.RawMessage) map[string]any {
+// some providers send an object. Both forms are handled. It is exported so the
+// review package can reuse the same parsing logic.
+func ParseToolArgs(raw json.RawMessage) map[string]any {
 	if len(raw) == 0 {
 		return map[string]any{}
 	}
@@ -204,6 +206,26 @@ func parseToolArgs(raw json.RawMessage) map[string]any {
 		args = map[string]any{}
 	}
 	return args
+}
+
+// maxToolOutput caps how much of a single tool result is fed back to the LLM
+// and persisted, so a verbose command cannot blow up the model context.
+const maxToolOutput = 8000
+
+// maxToolInput caps the tool-call arguments persisted with a diagnosis step.
+const maxToolInput = 4000
+
+// truncateOutput truncates s to at most max runes, appending a marker when it
+// does so. It is rune-aware so multi-byte output is never split.
+func truncateOutput(s string, max int) string {
+	if max <= 0 {
+		return s
+	}
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max]) + "\u2026[truncated]"
 }
 
 func summarize(s string, n int) string {
