@@ -5,10 +5,13 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/rusik69/opsagent/internal/model"
 )
+
+var ftsTokenRe = regexp.MustCompile(`[A-Za-z0-9]+`)
 
 func (s *Store) CreateMemory(ctx context.Context, m *model.Memory) (*model.Memory, error) {
 	if m.Tags == nil {
@@ -45,16 +48,66 @@ func (s *Store) SearchMemories(ctx context.Context, query string, limit int) ([]
 	if limit <= 0 {
 		limit = 20
 	}
-	like := "%" + strings.ToLower(query) + "%"
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, topic, content, tags_json, created_at FROM memories
-		 WHERE lower(topic) LIKE ? OR lower(content) LIKE ? OR lower(tags_json) LIKE ?
-		 ORDER BY id DESC LIMIT ?`, like, like, like, limit)
+	if s.ftsMemories {
+		if match, ok := ftsMatch(query); ok {
+			rows, err := s.db.QueryContext(ctx,
+				`SELECT m.id, m.topic, m.content, m.tags_json, m.created_at
+				 FROM memories_fts f JOIN memories m ON m.id = f.rowid
+				 WHERE memories_fts MATCH ? ORDER BY bm25(memories_fts), m.id DESC LIMIT ?`,
+				match, limit)
+			if err == nil {
+				defer rows.Close()
+				return scanMemories(rows)
+			}
+			// Fall through to LIKE on FTS query errors.
+		}
+	}
+	// Non-FTS fallback: token-AND matching so a multi-word query like
+	// "nginx 502" matches a memory containing both terms anywhere.
+	tokens := ftsTokenRe.FindAllString(strings.ToLower(query), -1)
+	if len(tokens) == 0 {
+		return nil, nil
+	}
+	conds := make([]string, 0, len(tokens))
+	args := make([]any, 0, len(tokens)*3)
+	for _, tok := range tokens {
+		like := "%" + tok + "%"
+		conds = append(conds, `(lower(topic) LIKE ? OR lower(content) LIKE ? OR lower(tags_json) LIKE ?)`)
+		args = append(args, like, like, like)
+	}
+	q := `SELECT id, topic, content, tags_json, created_at FROM memories WHERE ` +
+		strings.Join(conds, " AND ") + ` ORDER BY id DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	return scanMemories(rows)
+}
+
+// ftsMatch converts a free-text query into a safe FTS5 MATCH expression: the
+// alphanumeric tokens of the query, each quoted, joined with OR. It returns
+// false when the query contains no usable tokens.
+func ftsMatch(query string) (string, bool) {
+	tokens := ftsTokenRe.FindAllString(strings.ToLower(query), -1)
+	if len(tokens) == 0 {
+		return "", false
+	}
+	parts := make([]string, 0, len(tokens))
+	for _, t := range tokens {
+		parts = append(parts, `"`+t+`"`)
+	}
+	return strings.Join(parts, " OR "), true
+}
+
+// MemoryContentExists reports whether a memory with identical content already
+// exists (case-insensitive), used to avoid storing duplicate lessons.
+func (s *Store) MemoryContentExists(ctx context.Context, content string) (bool, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM memories WHERE lower(content) = ?`, strings.ToLower(strings.TrimSpace(content))).Scan(&n)
+	return n > 0, err
 }
 
 // MemoryExists reports whether a memory with the topic already exists.

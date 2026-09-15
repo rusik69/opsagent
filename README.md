@@ -67,7 +67,7 @@ host are allowlisted templates, and no command may modify the host.
 | `set_incident_outcome` | Record root cause / confidence / resolved-via |
 | `get_incident_history` / `list_retrospectives` | Incident timeline + past reviews |
 | `recall_memory` / `store_memory` | Persistent agent memory |
-| `store_instruction` / `list_instructions` | Self-improvement instructions |
+| `store_instruction` / `list_instructions` / `apply_instruction` | Self-improvement instructions (apply marks one as incorporated) |
 
 ## HTTP API
 
@@ -92,6 +92,7 @@ host are allowlisted templates, and no command may modify the host.
 | POST | `/api/v1/hosts/{host}/commands/run` | Manually run a read-only command |
 | GET/POST | `/api/v1/repos`, `/api/v1/repos/sync`, `/api/v1/repos/search?q=` | Repos |
 | GET/POST | `/api/v1/memory`, `/api/v1/instructions` | Memory + instructions |
+| POST | `/api/v1/instructions/{id}/apply` | Mark an instruction as applied |
 | GET/POST | `/mcp` | MCP server (streamable HTTP) |
 | GET | `/healthz` | Liveness |
 

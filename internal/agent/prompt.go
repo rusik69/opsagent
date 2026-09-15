@@ -60,18 +60,31 @@ func (a *Agent) systemPrompt(inc *model.Incident) Message {
 	return Message{Role: "system", Content: p}
 }
 
-// loadRulesFile reads the AGENTS.md-style instructions file (rules and paths)
-// configured in agent.instructions_file. It is read on every diagnosis so
-// edits take effect without a restart.
+// loadRulesFile returns the AGENTS.md-style instructions file (rules and
+// paths) configured in agent.instructions_file. The file is cached and only
+// re-read when its mtime or size changes, so edits still take effect without a
+// restart while avoiding a read on every diagnosis.
 func (a *Agent) loadRulesFile() string {
 	if a.instructionsFile == "" {
 		return ""
 	}
+	fi, err := os.Stat(a.instructionsFile)
+	if err != nil {
+		return a.rulesCache
+	}
+	a.rulesMu.Lock()
+	defer a.rulesMu.Unlock()
+	if fi.ModTime().Equal(a.rulesModTime) && fi.Size() == a.rulesFileSize {
+		return a.rulesCache
+	}
 	data, err := os.ReadFile(a.instructionsFile)
 	if err != nil {
-		return ""
+		return a.rulesCache
 	}
-	return strings.TrimSpace(string(data))
+	a.rulesCache = strings.TrimSpace(string(data))
+	a.rulesModTime = fi.ModTime()
+	a.rulesFileSize = fi.Size()
+	return a.rulesCache
 }
 
 func (a *Agent) incidentPrompt(inc *model.Incident) string {
@@ -85,17 +98,27 @@ func (a *Agent) incidentPrompt(inc *model.Incident) string {
 Diagnose this incident now.`, inc.ID, inc.Host, inc.Severity, inc.Title, inc.Message, inc.Labels)
 }
 
+// maxInjectedInstructions caps how many not-yet-applied instructions are
+// injected into a diagnosis prompt, keeping the system prompt bounded.
+const maxInjectedInstructions = 20
+
 func (a *Agent) loadInstructions() string {
-	items, err := a.store.ListInstructions(context.Background(), 50)
+	items, err := a.store.ListInstructions(context.Background(), maxInjectedInstructions*3)
 	if err != nil || len(items) == 0 {
 		return "None."
 	}
 	var sb strings.Builder
+	injected := 0
 	for _, i := range items {
 		if i.Applied {
 			continue
 		}
+		if injected >= maxInjectedInstructions {
+			fmt.Fprintf(&sb, "- ... (%d further instructions not shown)\n", len(items)-injected)
+			break
+		}
 		fmt.Fprintf(&sb, "- (priority %d) %s\n", i.Priority, i.Content)
+		injected++
 	}
 	if sb.Len() == 0 {
 		return "None."

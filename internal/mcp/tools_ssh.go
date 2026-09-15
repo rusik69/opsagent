@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -49,10 +50,11 @@ func (s *Server) handleListCommands(ctx context.Context, request mcp.CallToolReq
 	for _, c := range s.deps.Executor.Allowlist().List() {
 		fmt.Fprintf(&sb, "%s\t%s\n  template: %s\n", c.ID, c.Description, c.Template)
 		if len(c.Params) > 0 {
-			var names []string
-			for p := range c.Params {
-				names = append(names, p)
+			names := make([]string, 0, len(c.Params))
+			for p, pattern := range c.Params {
+				names = append(names, fmt.Sprintf("%s=%s", p, pattern))
 			}
+			sort.Strings(names)
 			fmt.Fprintf(&sb, "  params: %s\n", strings.Join(names, ", "))
 		}
 	}

@@ -226,3 +226,45 @@ func TestMigrateExistingDBAddsColumns(t *testing.T) {
 		t.Fatalf("columns not usable after migration: %+v", got)
 	}
 }
+
+func TestMemoryFTSAndLIKE(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+	if _, err := s.CreateMemory(ctx, &model.Memory{Topic: "nginx", Content: "check error.log first when nginx returns 502", Tags: []string{"web"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateMemory(ctx, &model.Memory{Topic: "postgres", Content: "connection pool exhaustion causes latency spikes", Tags: []string{"db"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	items, err := s.SearchMemories(ctx, "nginx 502", 10)
+	if err != nil {
+		t.Fatalf("SearchMemories: %v", err)
+	}
+	if len(items) != 1 || items[0].Topic != "nginx" {
+		t.Fatalf("expected nginx memory, got %+v", items)
+	}
+
+	items, err = s.SearchMemories(ctx, "pool", 10)
+	if err != nil {
+		t.Fatalf("SearchMemories pool: %v", err)
+	}
+	if len(items) != 1 || items[0].Topic != "postgres" {
+		t.Fatalf("expected postgres memory, got %+v", items)
+	}
+
+	// A query with no alphanumeric tokens falls back to the LIKE path.
+	items, err = s.SearchMemories(ctx, "!!!", 10)
+	if err != nil {
+		t.Fatalf("SearchMemories fallback: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("expected no matches, got %+v", items)
+	}
+
+	// Dedup helper.
+	dup, err := s.MemoryContentExists(ctx, "check error.log first when nginx returns 502")
+	if err != nil || !dup {
+		t.Fatalf("expected duplicate detection (dup=%v err=%v)", dup, err)
+	}
+}

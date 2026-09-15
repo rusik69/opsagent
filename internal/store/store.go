@@ -14,6 +14,9 @@ import (
 
 type Store struct {
 	db *sql.DB
+	// ftsMemories reports whether the FTS5 memory index is available; when it
+	// is not (e.g. the driver lacks FTS5), memory search falls back to LIKE.
+	ftsMemories bool
 }
 
 func Open(path string) (*Store, error) {
@@ -154,6 +157,40 @@ CREATE TABLE IF NOT EXISTS retrospectives (
 	_, _ = s.db.Exec(`ALTER TABLE incidents ADD COLUMN confidence TEXT NOT NULL DEFAULT ''`)
 	_, _ = s.db.Exec(`ALTER TABLE incidents ADD COLUMN resolved_via TEXT NOT NULL DEFAULT ''`)
 	_, _ = s.db.Exec(`ALTER TABLE incidents ADD COLUMN resolved_at TEXT`)
+
+	// Optional FTS5 index over memories for ranked full-text recall. If the
+	// driver does not support FTS5 the table creation fails and the store
+	// silently falls back to LIKE-based search.
+	if err := s.enableMemoryFTS(); err != nil {
+		s.ftsMemories = false
+	} else {
+		s.ftsMemories = true
+	}
+	return nil
+}
+
+// enableMemoryFTS builds an external-content FTS5 table over memories with
+// triggers to keep it in sync, and rebuilds it from the base table.
+func (s *Store) enableMemoryFTS() error {
+	statements := []string{
+		`CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(topic, content, tags, content='memories', content_rowid='id')`,
+		`CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
+			INSERT INTO memories_fts(rowid, topic, content, tags) VALUES (new.id, new.topic, new.content, new.tags_json);
+		END`,
+		`CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
+			INSERT INTO memories_fts(memories_fts, rowid, topic, content, tags) VALUES ('delete', old.id, old.topic, old.content, old.tags_json);
+		END`,
+		`CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
+			INSERT INTO memories_fts(memories_fts, rowid, topic, content, tags) VALUES ('delete', old.id, old.topic, old.content, old.tags_json);
+			INSERT INTO memories_fts(rowid, topic, content, tags) VALUES (new.id, new.topic, new.content, new.tags_json);
+		END`,
+		`INSERT INTO memories_fts(memories_fts) VALUES ('rebuild')`,
+	}
+	for _, stmt := range statements {
+		if _, err := s.db.Exec(stmt); err != nil {
+			return fmt.Errorf("enable fts: %w", err)
+		}
+	}
 	return nil
 }
 

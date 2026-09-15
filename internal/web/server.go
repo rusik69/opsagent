@@ -148,6 +148,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/memory", s.handleAPICreateMemory)
 	s.mux.HandleFunc("GET /api/v1/instructions", s.handleAPIInstructions)
 	s.mux.HandleFunc("POST /api/v1/instructions", s.handleAPICreateInstruction)
+	s.mux.HandleFunc("POST /api/v1/instructions/{id}/apply", s.handleAPIApplyInstruction)
 }
 
 // Handler returns the root http.Handler with middleware applied.

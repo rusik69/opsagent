@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	mcpsdk "github.com/mark3labs/mcp-go/mcp"
@@ -24,6 +25,12 @@ type Agent struct {
 	timeout          time.Duration
 	hostConfigFn     func(host string) string
 	instructionsFile string
+	// rules cache: mtime-guarded so edits to the rules file still take effect
+	// without a restart, but the file is not re-read on every diagnosis.
+	rulesMu       sync.Mutex
+	rulesCache    string
+	rulesModTime  time.Time
+	rulesFileSize int64
 }
 
 type Options struct {
@@ -92,6 +99,7 @@ func (a *Agent) Diagnose(ctx context.Context, incident *model.Incident) (*model.
 			}
 			messages = append(messages, msg)
 			a.finish(ctx, d, "done", msg.Content, total)
+			a.maybeReflect(ctx, incident, d, messages, llmTools)
 			return d, nil
 		}
 		msg, usage, err := a.client.CompletionWithUsage(ctx, messages, llmTools)

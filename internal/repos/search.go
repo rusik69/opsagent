@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Match is a single search hit across the config repos.
@@ -17,6 +18,8 @@ type Match struct {
 	Path    string `json:"path"`
 	Line    int    `json:"line"`
 	Content string `json:"content"`
+	// Context holds the matched line plus a few surrounding lines.
+	Context string `json:"context,omitempty"`
 }
 
 const maxFileSize = 1 << 20 // 1 MiB
@@ -34,6 +37,61 @@ func isSkippablePath(p string) bool {
 	return false
 }
 
+// cachedFiles is a repo file-list cache entry.
+type cachedFiles struct {
+	files   []string
+	builtAt time.Time
+}
+
+// fileCacheTTL bounds how long a repo file list is reused between syncs.
+const fileCacheTTL = 10 * time.Minute
+
+// searchableFiles returns the searchable files of a repo, caching the walk so
+// repeated queries do not re-traverse the tree.
+func (m *Manager) searchableFiles(r *Repo) []string {
+	m.mu.Lock()
+	cf, ok := m.fileLists[r.Name]
+	m.mu.Unlock()
+	if ok && time.Since(cf.builtAt) < fileCacheTTL {
+		return cf.files
+	}
+	files := m.walkFiles(r)
+	m.mu.Lock()
+	m.fileLists[r.Name] = cachedFiles{files: files, builtAt: time.Now()}
+	m.mu.Unlock()
+	return files
+}
+
+// walkFiles lists files under r.Root that are eligible for search.
+func (m *Manager) walkFiles(r *Repo) []string {
+	files := []string{}
+	_ = filepath.WalkDir(r.Root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if isSkippablePath(d.Name()) && path != r.Root {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if isSkippablePath(path) {
+			return nil
+		}
+		name := d.Name()
+		if strings.HasSuffix(name, ".git") || strings.HasSuffix(name, ".png") ||
+			strings.HasSuffix(name, ".jpg") || strings.HasSuffix(name, ".gz") {
+			return nil
+		}
+		if fi, err := d.Info(); err != nil || fi.Size() > maxFileSize {
+			return nil
+		}
+		files = append(files, path)
+		return nil
+	})
+	return files
+}
+
 // Search walks all repos and returns file:line matches for query.
 func (m *Manager) Search(query string, maxResults int) []Match {
 	if maxResults <= 0 {
@@ -42,31 +100,14 @@ func (m *Manager) Search(query string, maxResults int) []Match {
 	q := strings.ToLower(query)
 	out := []Match{}
 	for _, r := range m.Repos() {
-		_ = filepath.WalkDir(r.Root, func(path string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return nil
-			}
-			if d.IsDir() {
-				if isSkippablePath(d.Name()) && path != r.Root {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			if isSkippablePath(path) || len(out) >= maxResults {
-				return nil
-			}
-			if strings.HasSuffix(d.Name(), ".git") || strings.HasSuffix(d.Name(), ".png") ||
-				strings.HasSuffix(d.Name(), ".jpg") || strings.HasSuffix(d.Name(), ".gz") {
-				return nil
-			}
-			if fi, err := d.Info(); err != nil || fi.Size() > maxFileSize {
-				return nil
+		for _, path := range m.searchableFiles(r) {
+			if len(out) >= maxResults {
+				break
 			}
 			if m.matchFile(path, q, r.Name, maxResults, &out) {
-				return filepath.SkipDir
+				break
 			}
-			return nil
-		})
+		}
 		if len(out) >= maxResults {
 			break
 		}
@@ -80,6 +121,9 @@ func (m *Manager) Search(query string, maxResults int) []Match {
 	return out
 }
 
+// contextLines is how many lines of surrounding context a match carries.
+const contextLines = 2
+
 // matchFile returns true when it reached the result cap while scanning the file.
 func (m *Manager) matchFile(path, q, repoName string, max int, out *[]Match) bool {
 	f, err := os.Open(path)
@@ -88,24 +132,56 @@ func (m *Manager) matchFile(path, q, repoName string, max int, out *[]Match) boo
 	}
 	defer f.Close()
 	rel := relPath(repoName, path)
+	var lines []string
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 64*1024), 64*1024)
-	line := 0
 	for sc.Scan() {
-		line++
-		text := sc.Text()
-		if strings.Contains(strings.ToLower(text), q) {
-			content := strings.TrimSpace(text)
-			if len(content) > 300 {
-				content = content[:300]
-			}
-			*out = append(*out, Match{Repo: repoName, Path: rel, Line: line, Content: content})
-			if len(*out) >= max {
-				return true
-			}
+		lines = append(lines, sc.Text())
+	}
+	if sc.Err() != nil {
+		return false
+	}
+	for i, text := range lines {
+		if !strings.Contains(strings.ToLower(text), q) {
+			continue
+		}
+		content := strings.TrimSpace(text)
+		if len(content) > 300 {
+			content = content[:300]
+		}
+		*out = append(*out, Match{
+			Repo:    repoName,
+			Path:    rel,
+			Line:    i + 1,
+			Content: content,
+			Context: contextAround(lines, i, contextLines),
+		})
+		if len(*out) >= max {
+			return true
 		}
 	}
 	return false
+}
+
+// contextAround returns the trimmed text of the n lines surrounding index idx.
+func contextAround(lines []string, idx, n int) string {
+	lo := idx - n
+	if lo < 0 {
+		lo = 0
+	}
+	hi := idx + n
+	if hi >= len(lines) {
+		hi = len(lines) - 1
+	}
+	parts := make([]string, 0, hi-lo+1)
+	for j := lo; j <= hi; j++ {
+		t := strings.TrimSpace(lines[j])
+		if len(t) > 300 {
+			t = t[:300]
+		}
+		parts = append(parts, t)
+	}
+	return strings.Join(parts, "\n")
 }
 
 func relPath(repo, path string) string {
@@ -127,27 +203,14 @@ func (m *Manager) DocsSearch(query string, maxResults int) []Match {
 		if r.Type != "docs" {
 			continue
 		}
-		_ = filepath.WalkDir(r.Root, func(path string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return nil
-			}
-			if d.IsDir() {
-				if isSkippablePath(d.Name()) && path != r.Root {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			if isSkippablePath(path) || len(out) >= maxResults {
-				return nil
-			}
-			if fi, err := d.Info(); err != nil || fi.Size() > maxFileSize {
-				return nil
+		for _, path := range m.searchableFiles(r) {
+			if len(out) >= maxResults {
+				break
 			}
 			if m.matchFile(path, q, r.Name, maxResults, &out) {
-				return filepath.SkipDir
+				break
 			}
-			return nil
-		})
+		}
 		if len(out) >= maxResults {
 			break
 		}
@@ -195,36 +258,26 @@ func (m *Manager) HostConfig(host string) string {
 // host, e.g. ansible host_vars/web-01.yml or puppet nodes/web-01.pp.
 func (m *Manager) hostNamedFiles(r *Repo, host string) []Match {
 	var out []Match
-	_ = filepath.WalkDir(r.Root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
+	for _, path := range m.searchableFiles(r) {
+		if len(out) >= 25 {
+			break
 		}
-		if d.IsDir() {
-			if isSkippablePath(d.Name()) && path != r.Root {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		name := d.Name()
+		name := filepath.Base(path)
 		base := strings.TrimSuffix(name, filepath.Ext(name))
 		if !strings.EqualFold(base, host) {
-			return nil
-		}
-		if fi, err := d.Info(); err != nil || fi.Size() > maxFileSize {
-			return nil
+			continue
 		}
 		content, err := readFirstLines(path, 50)
 		if err != nil {
-			return nil
+			continue
 		}
 		for i, line := range content {
 			out = append(out, Match{Repo: r.Name, Path: relPath(r.Name, path), Line: i + 1, Content: line})
 			if len(out) >= 25 {
-				return filepath.SkipAll
+				break
 			}
 		}
-		return nil
-	})
+	}
 	return out
 }
 
@@ -257,27 +310,14 @@ func (m *Manager) SearchIn(name, query string, maxResults int) []Match {
 	}
 	q := strings.ToLower(query)
 	var out []Match
-	_ = filepath.WalkDir(r.Root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if d.IsDir() {
-			if isSkippablePath(d.Name()) && path != r.Root {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if isSkippablePath(path) || len(out) >= maxResults {
-			return nil
-		}
-		if fi, err := d.Info(); err != nil || fi.Size() > maxFileSize {
-			return nil
+	for _, path := range m.searchableFiles(r) {
+		if len(out) >= maxResults {
+			break
 		}
 		if m.matchFile(path, q, r.Name, maxResults, &out) {
-			return filepath.SkipDir
+			break
 		}
-		return nil
-	})
+	}
 	return out
 }
 

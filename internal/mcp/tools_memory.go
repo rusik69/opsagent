@@ -40,7 +40,25 @@ func (s *Server) toolsMemory() []toolReg {
 				mcp.WithDescription("List the self-improvement instructions the agent should follow.")),
 			handler: s.handleListInstructions,
 		},
+		{
+			tool: mcp.NewTool("apply_instruction",
+				mcp.WithDescription("Mark an instruction as applied so it stops being injected into future diagnosis prompts (e.g. after it was merged into the rules file)."),
+				mcp.WithString("id", mcp.Required(), mcp.Description("Instruction id from list_instructions")),
+			),
+			handler: s.handleApplyInstruction,
+		},
 	}
+}
+
+func (s *Server) handleApplyInstruction(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	id := int64(intArgs(request.GetArguments(), "id", 0))
+	if id <= 0 {
+		return resultErr("id is required"), nil
+	}
+	if err := s.deps.Store.MarkInstructionApplied(ctx, id); err != nil {
+		return resultErr(fmt.Sprintf("error: %v", err)), nil
+	}
+	return resultText(fmt.Sprintf("instruction %d marked as applied", id)), nil
 }
 
 func (s *Server) handleRecallMemory(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -76,6 +94,10 @@ func (s *Server) handleStoreMemory(ctx context.Context, request mcp.CallToolRequ
 				tags = append(tags, tag)
 			}
 		}
+	}
+	// Avoid storing the same lesson twice; the agent only needs one copy.
+	if exists, _ := s.deps.Store.MemoryContentExists(ctx, content); exists {
+		return resultText(fmt.Sprintf("memory with identical content already exists (topic %q)", topic)), nil
 	}
 	mem, err := s.deps.Store.CreateMemory(ctx, &model.Memory{Topic: topic, Content: content, Tags: tags})
 	if err != nil {

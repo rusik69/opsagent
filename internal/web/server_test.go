@@ -951,3 +951,35 @@ func TestAPIKeyScopes(t *testing.T) {
 		t.Fatalf("webhook key GET: %d", got)
 	}
 }
+
+func TestApplyInstructionAPI(t *testing.T) {
+	ts := newTestServer(t)
+	// Create an instruction via the API.
+	body := strings.NewReader(`{"content":"always check dmesg","priority":2}`)
+	resp, err := http.Post(ts.ts.URL+"/api/v1/instructions", "application/json", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create instruction: %d", resp.StatusCode)
+	}
+	var ins struct {
+		ID int64 `json:"id"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&ins)
+
+	// Mark it applied.
+	resp2, err := http.Post(ts.ts.URL+fmt.Sprintf("/api/v1/instructions/%d/apply", ins.ID), "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("apply instruction: %d", resp2.StatusCode)
+	}
+	items, err := ts.store.ListInstructions(context.Background(), 10)
+	if err != nil || len(items) != 1 || !items[0].Applied {
+		t.Fatalf("expected instruction marked applied, got %+v (%v)", items, err)
+	}
+}

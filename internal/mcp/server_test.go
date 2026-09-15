@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/rusik69/opsagent/internal/config"
@@ -450,5 +451,69 @@ func TestCorrelateMissingArgsNoPanic(t *testing.T) {
 		if !res.IsError {
 			t.Fatalf("expected tool error for %v", args)
 		}
+	}
+}
+
+func TestListCommandsShowsParamPatterns(t *testing.T) {
+	deps, _ := newTestDeps(t)
+	srv, err := NewServer("test", "0.0.0", deps)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	out, err := srv.CallText(context.Background(), "list_commands", map[string]any{})
+	if err != nil {
+		t.Fatalf("list_commands: %v", err)
+	}
+	if !strings.Contains(out, "service=") {
+		t.Fatalf("expected param regex patterns in list_commands output, got:\n%s", out)
+	}
+}
+
+func TestApplyInstruction(t *testing.T) {
+	deps, st := newTestDeps(t)
+	srv, err := NewServer("test", "0.0.0", deps)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	ctx := context.Background()
+	ins, err := st.CreateInstruction(ctx, &model.Instruction{Content: "always check dmesg", Priority: 2, Source: "review"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := srv.CallText(ctx, "apply_instruction", map[string]any{"id": float64(ins.ID)})
+	if err != nil {
+		t.Fatalf("apply_instruction: %v", err)
+	}
+	if !strings.Contains(out, "applied") {
+		t.Fatalf("unexpected output: %s", out)
+	}
+	got, err := st.ListInstructions(ctx, 10)
+	if err != nil || len(got) != 1 || !got[0].Applied {
+		t.Fatalf("expected instruction marked applied, got %+v (%v)", got, err)
+	}
+}
+
+func TestStoreMemoryDedup(t *testing.T) {
+	deps, st := newTestDeps(t)
+	srv, err := NewServer("test", "0.0.0", deps)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	ctx := context.Background()
+	args := map[string]any{"topic": "nginx", "content": "check error.log first"}
+	if _, err := srv.CallText(ctx, "store_memory", args); err != nil {
+		t.Fatalf("store_memory: %v", err)
+	}
+	// Storing identical content again must be a no-op.
+	out, err := srv.CallText(ctx, "store_memory", args)
+	if err != nil {
+		t.Fatalf("store_memory dup: %v", err)
+	}
+	if !strings.Contains(out, "already exists") {
+		t.Fatalf("expected dedup message, got %q", out)
+	}
+	mems, err := st.ListMemories(ctx, 10)
+	if err != nil || len(mems) != 1 {
+		t.Fatalf("expected exactly 1 memory, got %d (%v)", len(mems), err)
 	}
 }

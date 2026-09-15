@@ -81,7 +81,11 @@ func (s *Server) handleSearchRepos(ctx context.Context, request mcp.CallToolRequ
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "%d match(es) for %q:\n", len(matches), q)
 	for _, m := range matches {
-		fmt.Fprintf(&sb, "%s\t%s:%d\t%s\n", m.Repo, m.Path, m.Line, m.Content)
+		text := m.Content
+		if m.Context != "" {
+			text = m.Context
+		}
+		fmt.Fprintf(&sb, "%s\t%s:%d\t%s\n", m.Repo, m.Path, m.Line, text)
 	}
 	return resultText(sb.String()), nil
 }

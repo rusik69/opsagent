@@ -408,6 +408,25 @@ func (s *Server) handleAPICreateInstruction(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusCreated, created)
 }
 
+// handleAPIApplyInstruction marks an instruction as applied so it stops being
+// injected into every diagnosis prompt.
+func (s *Server) handleAPIApplyInstruction(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid instruction id"})
+		return
+	}
+	if err := s.store.MarkInstructionApplied(r.Context(), id); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if isHTMX(r) {
+		s.handleInstructionsPartial(w, r)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "applied": true})
+}
+
 func splitComma(s string) []string {
 	out := []string{}
 	for _, part := range strings.Split(s, ",") {

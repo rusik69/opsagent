@@ -29,13 +29,16 @@ type Manager struct {
 	mu      sync.Mutex
 	repos   []*Repo
 	syncing map[string]bool
+	// fileLists caches the searchable files of each repo to avoid re-walking
+	// the tree on every query; invalidated when the repo is synced.
+	fileLists map[string]cachedFiles
 }
 
 func NewManager(repos []config.RepoConfig, cacheDir string) (*Manager, error) {
 	if cacheDir == "" {
 		cacheDir = "./data/repos"
 	}
-	m := &Manager{syncing: map[string]bool{}}
+	m := &Manager{syncing: map[string]bool{}, fileLists: map[string]cachedFiles{}}
 	for _, rc := range repos {
 		repo := &Repo{Name: rc.Name, Type: rc.Type, URL: rc.URL, Branch: rc.Branch}
 		switch {
@@ -115,6 +118,8 @@ func (m *Manager) beginSync(name string) bool {
 func (m *Manager) endSync(name string) {
 	m.mu.Lock()
 	delete(m.syncing, name)
+	// The checkout changed; the file list cache is stale.
+	delete(m.fileLists, name)
 	m.mu.Unlock()
 }
 

@@ -365,3 +365,35 @@ func TestDiagnoseDedupesIdenticalToolCalls(t *testing.T) {
 		t.Fatalf("expected 1 executed step, got %d", len(d.Steps))
 	}
 }
+
+func TestRulesFileCacheInvalidatesOnChange(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/AGENTS.md"
+	if err := os.WriteFile(path, []byte("# v1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := store.Open(t.TempDir() + "/rc.db")
+	defer st.Close()
+	al, _ := sshx.NewAllowlist(sshx.DefaultAllowlist())
+	exec := sshx.NewExecutor(al, &sshx.FakeRunner{}, st)
+	resolver := sshx.HostsFromTargets([]sshx.HostTarget{{Name: "web-01", Address: "10.0.0.1", User: "ops", Port: 22}})
+	rm, _ := repos.NewManager(nil, t.TempDir())
+	mcpSrv, _ := mcp.NewServer("test", "0.0.0", mcp.Deps{Executor: exec, Repos: rm, Store: st, Resolver: resolver})
+	ag := New(NewClient("http://127.0.0.1:1/v1", "", "m"), mcpSrv, st, Options{InstructionsFile: path})
+
+	inc := &model.Incident{ID: 1, Host: "web-01", Title: "x", Labels: map[string]string{}}
+	if !strings.Contains(ag.systemPrompt(inc).Content, "# v1") {
+		t.Fatal("expected v1 rules in prompt")
+	}
+	// Edit the file; mtime/size change must invalidate the cache.
+	if err := os.WriteFile(path, []byte("# v2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(ag.systemPrompt(inc).Content, "# v2") {
+		t.Fatal("expected v2 rules after file change (cache not invalidated)")
+	}
+	// Unchanged file must not re-read (cache hit keeps content).
+	if !strings.Contains(ag.systemPrompt(inc).Content, "# v2") {
+		t.Fatal("cache should still return v2")
+	}
+}
