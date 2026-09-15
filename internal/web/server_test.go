@@ -888,3 +888,66 @@ func TestDiagnosisConcurrencyLimit(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 }
+
+func TestAPIKeyScopes(t *testing.T) {
+	cfg := config.Default()
+	cfg.Server.Listen = ":0"
+	cfg.Server.APIKeyReadOnly = "ro-key"
+	cfg.Server.APIKeyWebhook = "hook-key"
+	cfg.LLM.Enabled = false
+
+	st, _ := store.Open(t.TempDir() + "/scopes.db")
+	defer st.Close()
+	al, _ := sshx.NewAllowlist(sshx.DefaultAllowlist())
+	executor := sshx.NewExecutor(al, &sshx.FakeRunner{}, st)
+	resolver := sshx.HostsFromTargets(nil)
+	rm, _ := repos.NewManager(nil, t.TempDir())
+	mcpSrv, _ := mcp.NewServer("t", "0", mcp.Deps{Executor: executor, Repos: rm, Store: st, Resolver: resolver})
+	ag := agent.New(agent.NewClient("http://127.0.0.1:1/v1", "", "m"), mcpSrv, st, agent.Options{})
+	ws, err := New(cfg, st, executor, resolver, rm, mcpSrv, ag, incidents.NewService(st), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(ws.Handler())
+	defer ts.Close()
+
+	get := func(key string) int {
+		req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/incidents", nil)
+		req.Header.Set("X-API-Key", key)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+	post := func(key string, path string) int {
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+path, strings.NewReader(`{"host":"web-01","title":"t"}`))
+		req.Header.Set("X-API-Key", key)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	// Read-only key: GET allowed, POST rejected.
+	if got := get("ro-key"); got != http.StatusOK {
+		t.Fatalf("read-only key GET: %d", got)
+	}
+	if got := post("ro-key", "/api/v1/incidents"); got != http.StatusUnauthorized {
+		t.Fatalf("read-only key POST: %d", got)
+	}
+	// Webhook key: intake POST allowed, diagnose POST rejected.
+	if got := post("hook-key", "/api/v1/incidents"); got != http.StatusCreated {
+		t.Fatalf("webhook key intake: %d", got)
+	}
+	if got := post("hook-key", "/api/v1/incidents/1/diagnose"); got != http.StatusUnauthorized {
+		t.Fatalf("webhook key diagnose: %d", got)
+	}
+	// Webhook key cannot read either.
+	if got := get("hook-key"); got != http.StatusUnauthorized {
+		t.Fatalf("webhook key GET: %d", got)
+	}
+}

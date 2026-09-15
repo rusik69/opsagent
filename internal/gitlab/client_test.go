@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // fakeGitLab simulates the GitLab REST API subset used by the client.
@@ -238,5 +239,57 @@ func TestGetMRStateUnconfigured(t *testing.T) {
 	c := New("", "")
 	if _, err := c.GetMRState(context.Background(), "p", 1); err == nil {
 		t.Fatal("expected error when gitlab not configured")
+	}
+}
+
+// TestRetryOnTransientError verifies that 429 and 5xx responses are retried
+// with backoff until success.
+func TestRetryOnTransientError(t *testing.T) {
+	var mu sync.Mutex
+	var attempts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		attempts++
+		n := attempts
+		mu.Unlock()
+		if n < 3 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"message":"rate limited"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"state":"merged"}`))
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "tok")
+	c.retryBase = time.Millisecond
+	state, err := c.GetMRState(context.Background(), "acme/infra", 42)
+	if err != nil {
+		t.Fatalf("GetMRState after retries: %v", err)
+	}
+	if state != "merged" {
+		t.Fatalf("expected merged, got %q", state)
+	}
+	if attempts != 3 {
+		t.Fatalf("expected 3 attempts, got %d", attempts)
+	}
+}
+
+// TestNoRetryOnClientError verifies 4xx (non-429) errors fail immediately.
+func TestNoRetryOnClientError(t *testing.T) {
+	var attempts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"message":"bad request"}`))
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "tok")
+	c.retryBase = time.Millisecond
+	if _, err := c.GetMRState(context.Background(), "acme/infra", 42); err == nil {
+		t.Fatal("expected error")
+	}
+	if attempts != 1 {
+		t.Fatalf("expected 1 attempt for 4xx, got %d", attempts)
 	}
 }

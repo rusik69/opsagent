@@ -19,6 +19,10 @@ type Client struct {
 	baseURL string
 	token   string
 	http    *http.Client
+	// maxRetries is the number of retries on transient (429/5xx/network) errors.
+	maxRetries int
+	// retryBase is the base backoff between retries.
+	retryBase time.Duration
 	// Defaults used when a tool call omits them.
 	DefaultProjectID   string
 	SourceBranchPrefix string
@@ -32,6 +36,8 @@ func New(baseURL, token string) *Client {
 		http:               &http.Client{Timeout: 60 * time.Second},
 		SourceBranchPrefix: "opsagent-fix",
 		TargetBranch:       "main",
+		maxRetries:         3,
+		retryBase:          500 * time.Millisecond,
 	}
 }
 
@@ -56,17 +62,40 @@ func (c *Client) escProject(projectID string) string {
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body any, out any) error {
+	retries := c.maxRetries
+	if retries < 0 {
+		retries = 0
+	}
+	for attempt := 0; ; attempt++ {
+		retryable, err := c.doOnce(ctx, method, path, body, out)
+		if err == nil {
+			return nil
+		}
+		if !retryable || attempt >= retries {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(c.backoff(attempt)):
+		}
+	}
+}
+
+// doOnce performs a single HTTP attempt and reports whether the failure is
+// worth retrying (network error, 429, or 5xx).
+func (c *Client) doOnce(ctx context.Context, method, path string, body any, out any) (bool, error) {
 	var rd io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
 		if err != nil {
-			return err
+			return false, err
 		}
 		rd = bytes.NewReader(data)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, rd)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -74,22 +103,36 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 	req.Header.Set("PRIVATE-TOKEN", c.token)
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("gitlab request: %w", err)
+		return true, fmt.Errorf("gitlab request: %w", err)
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
-		return err
+		return true, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("gitlab %s %s: %s", method, path, summarizeGitLabError(data, resp.StatusCode))
+		retryable := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
+		return retryable, fmt.Errorf("gitlab %s %s: %s", method, path, summarizeGitLabError(data, resp.StatusCode))
 	}
 	if out != nil && len(data) > 0 {
 		if err := json.Unmarshal(data, out); err != nil {
-			return fmt.Errorf("gitlab parse response: %w", err)
+			return false, fmt.Errorf("gitlab parse response: %w", err)
 		}
 	}
-	return nil
+	return false, nil
+}
+
+// backoff returns the exponential delay for a retry attempt, capped at 8s.
+func (c *Client) backoff(attempt int) time.Duration {
+	base := c.retryBase
+	if base <= 0 {
+		base = 500 * time.Millisecond
+	}
+	d := base << uint(attempt)
+	if d > 8*time.Second {
+		d = 8 * time.Second
+	}
+	return d
 }
 
 func summarizeGitLabError(data []byte, status int) string {

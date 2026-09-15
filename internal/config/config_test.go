@@ -150,3 +150,32 @@ func TestLoadParsesMaxConcurrent(t *testing.T) {
 		t.Errorf("expected max_concurrent 7, got %d", cfg.Agent.MaxConcurrent)
 	}
 }
+
+func TestSecretExpansion(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("OPSAGENT_TEST_TOKEN", "env-token")
+	secretFile := filepath.Join(dir, "secret.txt")
+	if err := os.WriteFile(secretFile, []byte("file-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "config.yaml")
+	content := `
+server:
+  api_key: "${OPSAGENT_TEST_TOKEN}"
+gitlab:
+  token: "file:` + secretFile + `"
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Server.APIKey != "env-token" {
+		t.Errorf("expected env-expanded api_key, got %q", cfg.Server.APIKey)
+	}
+	if cfg.GitLab.Token != "file-token" {
+		t.Errorf("expected file-backed token, got %q", cfg.GitLab.Token)
+	}
+}

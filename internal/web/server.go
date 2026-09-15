@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/rusik69/opsagent/internal/agent"
@@ -42,6 +44,8 @@ type Server struct {
 	mux       *http.ServeMux
 	// diagSem bounds the number of simultaneous diagnoses server-wide.
 	diagSem chan struct{}
+	// httpSrv is the running HTTP server (for graceful shutdown).
+	httpSrv *http.Server
 }
 
 // SetReviewer registers the self-improvement reviewer.
@@ -162,33 +166,90 @@ func (s *Server) logMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// apiKeyMiddleware enforces the configured API keys. When no key is set at
+// all, access is unrestricted. Three keys are supported, in decreasing scope:
+//   - api_key: full access to every endpoint.
+//   - api_key_readonly: GET/HEAD/OPTIONS requests only.
+//   - api_key_webhook: incident intake only (POST /api/v1/incidents and
+//     /api/v1/incidents/alertmanager), for alerting systems.
+//
+// /healthz is always exempt so liveness probes work without credentials.
 func (s *Server) apiKeyMiddleware(next http.Handler) http.Handler {
-	if s.cfg.Server.APIKey == "" {
+	cfg := s.cfg.Server
+	if cfg.APIKey == "" && cfg.APIKeyReadOnly == "" && cfg.APIKeyWebhook == "" {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Liveness probes must work without credentials.
 		if r.URL.Path == "/healthz" {
 			next.ServeHTTP(w, r)
 			return
 		}
-		key := r.Header.Get("X-API-Key")
+		key := apiKey(r)
 		if key == "" {
-			if c, err := r.Cookie("api_key"); err == nil {
-				key = c.Value
-			}
-		}
-		if key != s.cfg.Server.APIKey {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		next.ServeHTTP(w, r)
+		switch {
+		case cfg.APIKey != "" && key == cfg.APIKey:
+			next.ServeHTTP(w, r)
+			return
+		case cfg.APIKeyReadOnly != "" && key == cfg.APIKeyReadOnly && isReadOnly(r):
+			next.ServeHTTP(w, r)
+			return
+		case cfg.APIKeyWebhook != "" && key == cfg.APIKeyWebhook && isWebhook(r):
+			next.ServeHTTP(w, r)
+			return
+		}
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 	})
 }
 
+func apiKey(r *http.Request) string {
+	if k := r.Header.Get("X-API-Key"); k != "" {
+		return k
+	}
+	if c, err := r.Cookie("api_key"); err == nil {
+		return c.Value
+	}
+	return ""
+}
+
+func isReadOnly(r *http.Request) bool {
+	return r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions
+}
+
+func isWebhook(r *http.Request) bool {
+	if r.Method != http.MethodPost {
+		return false
+	}
+	switch r.URL.Path {
+	case "/api/v1/incidents", "/api/v1/incidents/alertmanager":
+		return true
+	}
+	return false
+}
+
+// ListenAndServe serves the API and UI with sensible connection timeouts.
+// ReadTimeout/WriteTimeout are intentionally left unset so the MCP streamable
+// HTTP transport (SSE) can hold long-lived connections.
 func (s *Server) ListenAndServe() error {
+	srv := &http.Server{
+		Addr:              s.cfg.Server.Listen,
+		Handler:           s.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+	s.httpSrv = srv
 	log.Printf("opsagent listening on %s", s.cfg.Server.Listen)
-	return http.ListenAndServe(s.cfg.Server.Listen, s.Handler())
+	return srv.ListenAndServe()
+}
+
+// Shutdown gracefully stops the HTTP server.
+func (s *Server) Shutdown(ctx context.Context) error {
+	if s.httpSrv == nil {
+		return nil
+	}
+	return s.httpSrv.Shutdown(ctx)
 }
 
 func (s *Server) render(w http.ResponseWriter, name string, data any) {

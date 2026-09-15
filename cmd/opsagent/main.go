@@ -4,8 +4,10 @@ import (
 	"context"
 	"flag"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -150,6 +152,8 @@ func main() {
 
 	// Agent.
 	llm := agent.NewClient(cfg.LLM.BaseURL, cfg.LLM.APIKey, cfg.LLM.Model)
+	llm.MaxRetries = cfg.LLM.MaxRetries
+	llm.MaxTokens = cfg.LLM.MaxTokens
 	ag := agent.New(llm, mcpSrv, st, agent.Options{
 		MaxSteps:         cfg.LLM.MaxSteps,
 		Timeout:          time.Duration(cfg.LLM.TimeoutSecs) * time.Second,
@@ -173,111 +177,185 @@ func main() {
 			Limit: cfg.Review.Limit, MinIncidents: cfg.Review.MinIncidents, MaxSummaryLen: cfg.Review.MaxSummaryLen,
 		})
 		ws.SetReviewer(rv)
+	}
+
+	// Background jobs: each runs on a ticker until the stop channel closes,
+	// so shutdown is graceful (tickers stop before the store is closed).
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	startTicker := func(interval time.Duration, first bool, fn func()) {
+		wg.Add(1)
 		go func() {
-			interval := time.Duration(cfg.Review.IntervalHours) * time.Hour
-			if interval <= 0 {
-				interval = 6 * time.Hour
+			defer wg.Done()
+			if first {
+				fn()
 			}
-			runReview := func() {
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-				defer cancel()
-				retro, err := rv.Run(ctx)
-				if err != nil {
-					log.Printf("review: %v", err)
-				} else if retro != nil {
-					log.Printf("review: %d incidents reviewed, %d memories, %d instructions", retro.IncidentsReviewd, retro.MemoriesCreated, retro.InstructionsCreated)
-				}
-			}
-			runReview()
 			tick := time.NewTicker(interval)
 			defer tick.Stop()
-			for range tick.C {
-				runReview()
+			for {
+				select {
+				case <-tick.C:
+					fn()
+				case <-stop:
+					return
+				}
 			}
 		}()
 	}
 
-	go func() {
-		if err := ws.ListenAndServe(); err != nil {
-			log.Fatalf("server: %v", err)
+	withCtx := func(timeout time.Duration, fn func(context.Context)) func() {
+		return func() {
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			defer cancel()
+			fn(ctx)
 		}
-	}()
+	}
 
-	// Background correlation ticker.
+	// Review loop.
+	if rv != nil {
+		interval := time.Duration(cfg.Review.IntervalHours) * time.Hour
+		if interval <= 0 {
+			interval = 6 * time.Hour
+		}
+		startTicker(interval, true, withCtx(5*time.Minute, func(ctx context.Context) {
+			retro, err := rv.Run(ctx)
+			if err != nil {
+				log.Printf("review: %v", err)
+			} else if retro != nil {
+				log.Printf("review: %d incidents reviewed, %d memories, %d instructions", retro.IncidentsReviewd, retro.MemoriesCreated, retro.InstructionsCreated)
+			}
+		}))
+	}
+
+	// Correlation loop.
 	if corr != nil {
-		go func() {
-			interval := time.Duration(cfg.Correlate.IntervalMinutes) * time.Minute
-			if interval <= 0 {
-				interval = 15 * time.Minute
+		interval := time.Duration(cfg.Correlate.IntervalMinutes) * time.Minute
+		if interval <= 0 {
+			interval = 15 * time.Minute
+		}
+		startTicker(interval, true, withCtx(2*time.Minute, func(ctx context.Context) {
+			if err := corr.Run(ctx); err != nil {
+				log.Printf("correlation: %v", err)
 			}
-			runCorr := func() {
-				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-				defer cancel()
-				if err := corr.Run(ctx); err != nil {
-					log.Printf("correlation: %v", err)
-				}
-			}
-			runCorr()
-			tick := time.NewTicker(interval)
-			defer tick.Stop()
-			for range tick.C {
-				runCorr()
-			}
-		}()
+		}))
 	}
 
 	// MR merge poller: when an agent-created MR is merged, mark the incident
 	// resolved via mr_merged (outcome feedback for the review loop).
 	if gl != nil && cfg.GitLab.PollMRSeconds > 0 {
-		go func() {
-			interval := time.Duration(cfg.GitLab.PollMRSeconds) * time.Second
-			tick := time.NewTicker(interval)
-			defer tick.Stop()
-			for range tick.C {
-				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-				pollMRMerges(ctx, gl, st, cfg.GitLab.DefaultProjectID)
-				cancel()
-			}
-		}()
+		interval := time.Duration(cfg.GitLab.PollMRSeconds) * time.Second
+		startTicker(interval, false, withCtx(2*time.Minute, func(ctx context.Context) {
+			pollMRMerges(ctx, gl, st, cfg.GitLab.DefaultProjectID)
+		}))
 	}
 
-	shutdown := make(chan os.Signal, 1)
-	signal.Notify(shutdown, syscall.SIGINT, syscall.SIGTERM)
-	<-shutdown
-	log.Printf("shutting down")
+	// Periodic repo sync keeps cloned config repos fresh.
+	if cfg.Maintenance.RepoSyncMinutes > 0 {
+		interval := time.Duration(cfg.Maintenance.RepoSyncMinutes) * time.Minute
+		startTicker(interval, false, withCtx(5*time.Minute, func(ctx context.Context) {
+			if out, err := reposMgr.Sync(ctx); err != nil {
+				log.Printf("repos sync: %v", err)
+			} else {
+				log.Printf("repos sync:\n%s", out)
+			}
+		}))
+	}
+
+	// Retention: prune old command runs and events.
+	if cfg.Storage.RetentionDays > 0 {
+		startTicker(time.Hour, false, withCtx(2*time.Minute, func(ctx context.Context) {
+			cutoff := time.Now().UTC().Add(-time.Duration(cfg.Storage.RetentionDays) * 24 * time.Hour)
+			runs, evs, err := st.PruneOlderThan(ctx, cutoff)
+			if err != nil {
+				log.Printf("retention: %v", err)
+			} else if runs+evs > 0 {
+				log.Printf("retention: pruned %d command runs, %d events", runs, evs)
+			}
+		}))
+	}
+
+	// Serve until the server exits or a signal arrives.
+	srvErr := make(chan error, 1)
+	go func() { srvErr <- ws.ListenAndServe() }()
+
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	select {
+	case err := <-srvErr:
+		if err != nil && err != http.ErrServerClosed {
+			log.Fatalf("server: %v", err)
+		}
+	case <-signals:
+		log.Printf("shutting down")
+	}
+
+	// Graceful shutdown: stop tickers, drain the HTTP server, then close the
+	// store (deferred).
+	close(stop)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = ws.Shutdown(ctx)
+	wg.Wait()
 }
 
 // pollMRMerges checks agent-created MRs for merge and marks incidents resolved.
+// Checks run concurrently (bounded) since each is an independent HTTP round trip.
 func pollMRMerges(ctx context.Context, gl *gitlab.Client, st *store.Store, projectID string) {
 	incs, err := st.ListIncidentsWithMR(ctx, 100)
 	if err != nil {
 		log.Printf("mr poll: list: %v", err)
 		return
 	}
+	const workers = 8
+	jobs := make(chan *model.Incident)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for inc := range jobs {
+				pollOneMR(ctx, gl, st, projectID, inc)
+			}
+		}()
+	}
 	for _, inc := range incs {
-		iid, ok := gitlab.ParseMRID(inc.MRURL)
-		if !ok {
-			continue
+		select {
+		case jobs <- inc:
+		case <-ctx.Done():
+			close(jobs)
+			wg.Wait()
+			return
 		}
-		state, err := gl.GetMRState(ctx, projectID, iid)
-		if err != nil {
-			log.Printf("mr poll: state of #%d (mr %d): %v", inc.ID, iid, err)
-			continue
+	}
+	close(jobs)
+	wg.Wait()
+}
+
+// pollOneMR checks the state of a single incident's merge request.
+func pollOneMR(ctx context.Context, gl *gitlab.Client, st *store.Store, projectID string, inc *model.Incident) {
+	iid, ok := gitlab.ParseMRID(inc.MRURL)
+	if !ok {
+		return
+	}
+	state, err := gl.GetMRState(ctx, projectID, iid)
+	if err != nil {
+		log.Printf("mr poll: state of #%d (mr %d): %v", inc.ID, iid, err)
+		return
+	}
+	switch state {
+	case "merged":
+		if err := st.MarkResolved(ctx, inc.ID, "mr_merged"); err != nil {
+			log.Printf("mr poll: resolve #%d: %v", inc.ID, err)
+			return
 		}
-		switch state {
-		case "merged":
-			if err := st.MarkResolved(ctx, inc.ID, "mr_merged"); err != nil {
-				log.Printf("mr poll: resolve #%d: %v", inc.ID, err)
-				continue
-			}
-			_, _ = st.AddEvent(ctx, inc.ID, model.EventMRMerged, inc.MRURL)
-			log.Printf("mr poll: incident #%d resolved via merged MR %d", inc.ID, iid)
-		case "closed":
-			has, _ := st.HasEvent(ctx, inc.ID, model.EventMRClosed)
-			if !has {
-				_, _ = st.AddEvent(ctx, inc.ID, model.EventMRClosed, inc.MRURL)
-				log.Printf("mr poll: incident #%d MR %d closed without merge", inc.ID, iid)
-			}
+		_, _ = st.AddEvent(ctx, inc.ID, model.EventMRMerged, inc.MRURL)
+		log.Printf("mr poll: incident #%d resolved via merged MR %d", inc.ID, iid)
+	case "closed":
+		has, _ := st.HasEvent(ctx, inc.ID, model.EventMRClosed)
+		if !has {
+			_, _ = st.AddEvent(ctx, inc.ID, model.EventMRClosed, inc.MRURL)
+			log.Printf("mr poll: incident #%d MR %d closed without merge", inc.ID, iid)
 		}
 	}
 }

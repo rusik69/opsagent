@@ -1,9 +1,14 @@
 server:
   listen: ":8080"
-  api_key: ""            # optional; set to require X-API-Key on API calls
+  api_key: ""                 # optional; set to require X-API-Key on all endpoints
+  api_key_readonly: ""        # optional; scoped key that only allows GET requests
+  api_key_webhook: ""         # optional; scoped key limited to incident intake webhooks
+  # api_key/gitlab.token/llm.api_key support ${ENV_VAR} expansion and a file:
+  # prefix to read the secret from a file.
 
 storage:
   path: "./data/opsagent.db"
+  retention_days: 90         # prune command runs/events older than this (0 = keep forever)
 
 ssh:
   timeout_seconds: 15
@@ -77,6 +82,10 @@ llm:
   model: "llama3.1"
   max_steps: 12
   timeout_secs: 180
+  max_retries: 3             # retries on transient LLM errors (429/5xx)
+  max_tokens: 0              # optional cap on completion length (0 = provider default)
 
 mcp:
   expose_http: true      # serve the MCP server over HTTP at /mcp
+maintenance:
+  repos_sync_minutes: 60     # periodically pull config repos (0 = only initial sync)
