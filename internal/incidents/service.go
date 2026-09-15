@@ -28,6 +28,9 @@ type GenericIncident struct {
 	ExternalID string            `json:"external_id"`
 	Source     string            `json:"source"`
 	Labels     map[string]string `json:"labels"`
+	Tags       []string          `json:"tags"`
+	Owner      string            `json:"owner"`
+	Team       string            `json:"team"`
 }
 
 // CreateGeneric normalizes a generic webhook payload into an Incident.
@@ -56,6 +59,15 @@ func (s *Service) CreateGeneric(ctx context.Context, g GenericIncident) (*model.
 	if src == "" {
 		src = "generic"
 	}
+	// Deduplicate: an already-open incident for the same external alert is
+	// refreshed instead of creating a second one.
+	if g.ExternalID != "" {
+		if existing, err := s.store.FindOpenIncidentByExternal(ctx, src, g.ExternalID, host); err == nil && existing != nil {
+			_ = s.store.UpdateIncidentDetails(ctx, existing.ID, sev, title, g.Message)
+			existing.Severity, existing.Title, existing.Message = sev, title, g.Message
+			return existing, nil
+		}
+	}
 	inc := &model.Incident{
 		ExternalID: g.ExternalID,
 		Source:     src,
@@ -64,6 +76,9 @@ func (s *Service) CreateGeneric(ctx context.Context, g GenericIncident) (*model.
 		Title:      title,
 		Message:    g.Message,
 		Labels:     g.Labels,
+		Tags:       g.Tags,
+		Owner:      g.Owner,
+		Team:       g.Team,
 		Status:     model.IncidentOpen,
 	}
 	created, err := s.store.CreateIncident(ctx, inc)
@@ -118,9 +133,6 @@ func (s *Service) CreateAlertmanager(ctx context.Context, payload AlertmanagerPa
 		payload.Alerts = payload.Alerts[:maxAlertsPerPayload]
 	}
 	for _, a := range payload.Alerts {
-		if a.Status == "resolved" || payload.Status == "resolved" {
-			continue
-		}
 		labels := a.Labels
 		if labels == nil {
 			labels = map[string]string{}
@@ -129,6 +141,26 @@ func (s *Service) CreateAlertmanager(ctx context.Context, payload AlertmanagerPa
 		if host == "" {
 			continue
 		}
+		externalID := labels["alertname"] + ":" + host + ":" + a.StartsAt
+
+		// A resolved alert clears any matching open incident (auto-resolution).
+		if a.Status == "resolved" || payload.Status == "resolved" {
+			if existing, err := s.store.FindOpenIncidentByExternal(ctx, "alertmanager", externalID, host); err == nil && existing != nil {
+				if err := s.store.MarkResolved(ctx, existing.ID, "auto"); err == nil {
+					_, _ = s.store.AddEvent(ctx, existing.ID, model.EventResolved, "alertmanager: alert resolved")
+					created = append(created, existing)
+				}
+			}
+			continue
+		}
+
+		// Deduplicate: Alertmanager re-delivers the same firing alert with the
+		// same startsAt; refresh the existing incident instead of duplicating.
+		if existing, err := s.store.FindOpenIncidentByExternal(ctx, "alertmanager", externalID, host); err == nil && existing != nil {
+			created = append(created, existing)
+			continue
+		}
+
 		title := labels["alertname"]
 		if title == "" {
 			title = "alert"
@@ -139,13 +171,15 @@ func (s *Service) CreateAlertmanager(ctx context.Context, payload AlertmanagerPa
 			msg = a.Annotations["summary"]
 		}
 		inc := &model.Incident{
-			ExternalID: a.Labels["alertname"] + ":" + host + ":" + a.StartsAt,
+			ExternalID: externalID,
 			Source:     "alertmanager",
 			Host:       host,
 			Severity:   sev,
 			Title:      title,
 			Message:    msg,
 			Labels:     labels,
+			Owner:      labels["owner"],
+			Team:       labels["team"],
 			Status:     model.IncidentOpen,
 		}
 		createdInc, err := s.store.CreateIncident(ctx, inc)

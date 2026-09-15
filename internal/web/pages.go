@@ -8,6 +8,7 @@ import (
 	"strconv"
 
 	"github.com/rusik69/opsagent/internal/model"
+	"github.com/rusik69/opsagent/internal/store"
 )
 
 type dashboardData struct {
@@ -15,6 +16,7 @@ type dashboardData struct {
 	Open        int
 	Critical    int
 	NeedsReview int
+	Stats       *store.IncidentStats
 	Recent      []*model.Incident
 }
 
@@ -40,11 +42,13 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 			recent = append(recent, inc)
 		}
 	}
+	stats, _ := s.store.IncidentStats(r.Context())
 	s.render(w, "dashboard", dashboardData{
 		Total:       len(all),
 		Open:        open,
 		Critical:    critical,
 		NeedsReview: needsReview,
+		Stats:       stats,
 		Recent:      recent,
 	})
 }

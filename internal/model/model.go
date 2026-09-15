@@ -11,6 +11,7 @@ const (
 	IncidentError      IncidentStatus = "error"
 	IncidentResolved   IncidentStatus = "resolved"
 	IncidentCancelled  IncidentStatus = "cancelled"
+	IncidentDeleted    IncidentStatus = "deleted"
 )
 
 type Severity string
@@ -30,6 +31,9 @@ type Incident struct {
 	Title       string            `json:"title"`
 	Message     string            `json:"message"`
 	Labels      map[string]string `json:"labels"`
+	Tags        []string          `json:"tags,omitempty"`
+	Owner       string            `json:"owner,omitempty"`
+	Team        string            `json:"team,omitempty"`
 	Status      IncidentStatus    `json:"status"`
 	Solution    string            `json:"solution"`
 	MRURL       string            `json:"mr_url"`

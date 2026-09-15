@@ -42,9 +42,12 @@ func NewServer(name, version string, deps Deps) (*Server, error) {
 	s := &Server{deps: deps}
 	mcpServer := server.NewMCPServer(name, version,
 		server.WithToolCapabilities(true),
+		server.WithResourceCapabilities(true, true),
+		server.WithPromptCapabilities(true),
 		server.WithLogging(),
 	)
 	s.mcp = mcpServer
+	s.registerResources(mcpServer)
 
 	regs := []toolReg{}
 	regs = append(regs, s.toolsSSH()...)

@@ -76,6 +76,9 @@
     <dt>Source</dt><dd>{{.Incident.Source}}</dd>
     <dt>External ID</dt><dd>{{.Incident.ExternalID}}</dd>
     <dt>Created</dt><dd>{{.Incident.CreatedAt.Format "2006-01-02 15:04:05"}}</dd>
+    {{if .Incident.Owner}}<dt>Owner</dt><dd>{{.Incident.Owner}}</dd>{{end}}
+    {{if .Incident.Team}}<dt>Team</dt><dd>{{.Incident.Team}}</dd>{{end}}
+    {{if .Incident.Tags}}<dt>Tags</dt><dd>{{range .Incident.Tags}}<span class="badge info">{{.}}</span> {{end}}</dd>{{end}}
     {{range $k, $v := .Incident.Labels}}<dt>label: {{$k}}</dt><dd>{{$v}}</dd>{{end}}
   </dl>
   {{template "incident_actions" .}}

@@ -14,6 +14,9 @@ import (
 // Incident intake ---------------------------------------------------------
 
 func (s *Server) handleAPICreateIncident(w http.ResponseWriter, r *http.Request) {
+	if !s.verifyWebhookSignature(w, r) {
+		return
+	}
 	var g incidents.GenericIncident
 	if r.Header.Get("Content-Type") == "application/x-www-form-urlencoded" {
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
@@ -27,6 +30,11 @@ func (s *Server) handleAPICreateIncident(w http.ResponseWriter, r *http.Request)
 		g.Message = r.Form.Get("message")
 		g.Source = r.Form.Get("source")
 		g.ExternalID = r.Form.Get("external_id")
+		g.Owner = r.Form.Get("owner")
+		g.Team = r.Form.Get("team")
+		if t := r.Form.Get("tags"); t != "" {
+			g.Tags = splitComma(t)
+		}
 		if g.Labels == nil {
 			g.Labels = map[string]string{}
 		}
@@ -35,12 +43,9 @@ func (s *Server) handleAPICreateIncident(w http.ResponseWriter, r *http.Request)
 				g.Labels[k] = vs[0]
 			}
 		}
-		delete(g.Labels, "host")
-		delete(g.Labels, "title")
-		delete(g.Labels, "severity")
-		delete(g.Labels, "message")
-		delete(g.Labels, "source")
-		delete(g.Labels, "external_id")
+		for _, k := range []string{"host", "title", "severity", "message", "source", "external_id", "owner", "team", "tags"} {
+			delete(g.Labels, k)
+		}
 	} else {
 		if err := readJSON(r, &g); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
@@ -60,6 +65,9 @@ func (s *Server) handleAPICreateIncident(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleAPIAlertmanager(w http.ResponseWriter, r *http.Request) {
+	if !s.verifyWebhookSignature(w, r) {
+		return
+	}
 	var payload incidents.AlertmanagerPayload
 	if err := readJSON(r, &payload); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
@@ -437,6 +445,16 @@ func splitComma(s string) []string {
 	return out
 }
 
+// handleAPIStats returns dashboard aggregates.
+func (s *Server) handleAPIStats(w http.ResponseWriter, r *http.Request) {
+	st, err := s.store.IncidentStats(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, st)
+}
+
 // Groups & correlation ------------------------------------------------------
 
 func (s *Server) handleAPIGroups(w http.ResponseWriter, r *http.Request) {
@@ -514,6 +532,112 @@ func (s *Server) handleAPIRelated(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"groups": groups, "incidents": incs})
+}
+
+// handleAPIDeleteIncident soft-deletes an incident.
+func (s *Server) handleAPIDeleteIncident(w http.ResponseWriter, r *http.Request) {
+	inc := s.incidentFromPath(w, r)
+	if inc == nil {
+		return
+	}
+	if err := s.store.DeleteIncident(r.Context(), inc.ID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	_, _ = s.store.AddEvent(r.Context(), inc.ID, model.EventCancelled, "incident deleted by operator")
+	writeJSON(w, http.StatusOK, map[string]any{"id": inc.ID, "status": model.IncidentDeleted})
+}
+
+type bulkRequest struct {
+	IDs    []int64              `json:"ids"`
+	Status model.IncidentStatus `json:"status"`
+}
+
+func decodeBulk(w http.ResponseWriter, r *http.Request) (*bulkRequest, bool) {
+	var req bulkRequest
+	if err := readJSON(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+		return nil, false
+	}
+	if len(req.IDs) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ids is required"})
+		return nil, false
+	}
+	return &req, true
+}
+
+// handleAPIBulkStatus transitions many incidents to a status at once.
+func (s *Server) handleAPIBulkStatus(w http.ResponseWriter, r *http.Request) {
+	req, ok := decodeBulk(w, r)
+	if !ok {
+		return
+	}
+	switch req.Status {
+	case model.IncidentOpen, model.IncidentDiagnosed, model.IncidentResolved, model.IncidentCancelled, model.IncidentError:
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("invalid status %q", req.Status)})
+		return
+	}
+	if req.Status == model.IncidentResolved {
+		for _, id := range req.IDs {
+			_ = s.store.MarkResolved(r.Context(), id, "manual")
+			_, _ = s.store.AddEvent(r.Context(), id, model.EventResolved, "resolved in bulk by operator")
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"updated": len(req.IDs), "status": req.Status})
+		return
+	}
+	n, err := s.store.BulkUpdateStatus(r.Context(), req.IDs, req.Status)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"updated": n, "status": req.Status})
+}
+
+// handleAPIBulkDelete soft-deletes many incidents at once.
+func (s *Server) handleAPIBulkDelete(w http.ResponseWriter, r *http.Request) {
+	req, ok := decodeBulk(w, r)
+	if !ok {
+		return
+	}
+	n, err := s.store.BulkUpdateStatus(r.Context(), req.IDs, model.IncidentDeleted)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"deleted": n})
+}
+
+// handleAPIAddNote appends an operator note to an incident's timeline.
+func (s *Server) handleAPIAddNote(w http.ResponseWriter, r *http.Request) {
+	inc := s.incidentFromPath(w, r)
+	if inc == nil {
+		return
+	}
+	var req struct {
+		Note string `json:"note"`
+	}
+	if r.Header.Get("Content-Type") == "application/x-www-form-urlencoded" {
+		_ = r.ParseForm()
+		req.Note = r.Form.Get("note")
+	} else if err := readJSON(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+		return
+	}
+	req.Note = strings.TrimSpace(req.Note)
+	if req.Note == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "note is required"})
+		return
+	}
+	if _, err := s.store.AddEvent(r.Context(), inc.ID, model.EventNote, req.Note); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if isHTMX(r) {
+		s.renderIncidentPartial(w, r, inc)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"id": inc.ID, "note": req.Note})
 }
 
 func (s *Server) handleAPIIncidentEvents(w http.ResponseWriter, r *http.Request) {

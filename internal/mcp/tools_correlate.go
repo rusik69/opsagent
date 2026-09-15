@@ -49,7 +49,28 @@ func (s *Server) toolsCorrelate() []toolReg {
 				mcp.WithDescription("List past self-improvement reviews over incident history, with the memories and instructions they produced.")),
 			handler: s.handleListRetrospectives,
 		},
+		{
+			tool: mcp.NewTool("add_note",
+				mcp.WithDescription("Append a free-text note to an incident's timeline (visible to operators and in future diagnoses)."),
+				mcp.WithString("incident_id", mcp.Required(), mcp.Description("Incident id")),
+				mcp.WithString("note", mcp.Required(), mcp.Description("Note text")),
+			),
+			handler: s.handleAddNote,
+		},
 	}
+}
+
+func (s *Server) handleAddNote(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := request.GetArguments()
+	id := int64(intArgs(args, "incident_id", 0))
+	note := strArgs(args, "note", "")
+	if id <= 0 || note == "" {
+		return resultErr("incident_id and note are required"), nil
+	}
+	if _, err := s.deps.Store.AddEvent(ctx, id, model.EventNote, note); err != nil {
+		return resultErr(fmt.Sprintf("error: %v", err)), nil
+	}
+	return resultText(fmt.Sprintf("note added to incident #%d", id)), nil
 }
 
 func (s *Server) handleGetRelated(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {

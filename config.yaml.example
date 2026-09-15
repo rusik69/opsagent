@@ -3,6 +3,7 @@ server:
   api_key: ""                 # optional; set to require X-API-Key on all endpoints
   api_key_readonly: ""        # optional; scoped key that only allows GET requests
   api_key_webhook: ""         # optional; scoped key limited to incident intake webhooks
+  webhook_hmac_secret: ""     # optional; require X-Webhook-Signature (HMAC-SHA256 hex of body) on intake
   # api_key/gitlab.token/llm.api_key support ${ENV_VAR} expansion and a file:
   # prefix to read the secret from a file.
 
@@ -67,6 +68,7 @@ correlate:
   window_minutes: 120
   interval_minutes: 15
   methods: [host, alertname, label, rootcause]
+  label_keys: [cluster, service, region]  # labels used by the "label" method
 
 review:
   enabled: true
@@ -89,3 +91,4 @@ mcp:
   expose_http: true      # serve the MCP server over HTTP at /mcp
 maintenance:
   repos_sync_minutes: 60     # periodically pull config repos (0 = only initial sync)
+  auto_close_hours: 0        # auto-close open incidents older than this (0 = disabled)

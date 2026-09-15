@@ -1,8 +1,12 @@
 package web
 
 import (
+	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -128,7 +132,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/incidents/{id}/diagnosis", s.handleAPIGetDiagnosis)
 	s.mux.HandleFunc("GET /api/v1/incidents/{id}/related", s.handleAPIRelated)
 	s.mux.HandleFunc("GET /api/v1/incidents/{id}/events", s.handleAPIIncidentEvents)
+	s.mux.HandleFunc("POST /api/v1/incidents/{id}/note", s.handleAPIAddNote)
+	s.mux.HandleFunc("DELETE /api/v1/incidents/{id}", s.handleAPIDeleteIncident)
+	s.mux.HandleFunc("POST /api/v1/incidents/bulk/status", s.handleAPIBulkStatus)
+	s.mux.HandleFunc("POST /api/v1/incidents/bulk/delete", s.handleAPIBulkDelete)
 
+	s.mux.HandleFunc("GET /api/v1/stats", s.handleAPIStats)
 	s.mux.HandleFunc("GET /api/v1/groups", s.handleAPIGroups)
 	s.mux.HandleFunc("GET /api/v1/groups/{id}", s.handleAPIGroupDetail)
 	s.mux.HandleFunc("POST /api/v1/correlate/run", s.handleAPIRunCorrelation)
@@ -271,6 +280,30 @@ func sliceSolution(s string) string {
 		return s[:80] + "…"
 	}
 	return s
+}
+
+// verifyWebhookSignature enforces the optional X-Webhook-Signature HMAC-SHA256
+// header on intake endpoints. The raw body is consumed and then replaced so the
+// handler can parse it normally.
+func (s *Server) verifyWebhookSignature(w http.ResponseWriter, r *http.Request) bool {
+	secret := s.cfg.Server.WebhookHMACSecret
+	if secret == "" {
+		return true
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return false
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write(body)
+	want := hex.EncodeToString(mac.Sum(nil))
+	if !hmac.Equal([]byte(r.Header.Get("X-Webhook-Signature")), []byte(want)) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return false
+	}
+	return true
 }
 
 func readJSON(r *http.Request, v any) error {

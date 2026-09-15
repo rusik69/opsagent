@@ -11,7 +11,7 @@ import (
 	"github.com/rusik69/opsagent/internal/model"
 )
 
-const incidentCols = `id, external_id, source, host, severity, title, message, labels_json, status, solution, mr_url, root_cause, confidence, resolved_via, resolved_at, created_at, updated_at`
+const incidentCols = `id, external_id, source, host, severity, title, message, labels_json, tags_json, owner, team, status, solution, mr_url, root_cause, confidence, resolved_via, resolved_at, created_at, updated_at`
 
 // prefixedIncidentCols returns the incident columns qualified with an alias.
 func prefixedIncidentCols(alias string) string {
@@ -27,15 +27,16 @@ func scanIncident(row interface{ Scan(...any) error }) (*model.Incident, error) 
 	var (
 		inc        model.Incident
 		labels     string
+		tags       string
 		status     string
 		createdAt  string
 		updatedAt  string
 		resolvedAt sql.NullString
 	)
 	if err := row.Scan(&inc.ID, &inc.ExternalID, &inc.Source, &inc.Host, &inc.Severity,
-		&inc.Title, &inc.Message, &labels, &status, &inc.Solution, &inc.MRURL,
-		&inc.RootCause, &inc.Confidence, &inc.ResolvedVia, &resolvedAt,
-		&createdAt, &updatedAt); err != nil {
+		&inc.Title, &inc.Message, &labels, &tags, &inc.Owner, &inc.Team, &status,
+		&inc.Solution, &inc.MRURL, &inc.RootCause, &inc.Confidence, &inc.ResolvedVia,
+		&resolvedAt, &createdAt, &updatedAt); err != nil {
 		return nil, err
 	}
 	inc.Status = model.IncidentStatus(status)
@@ -49,6 +50,10 @@ func scanIncident(row interface{ Scan(...any) error }) (*model.Incident, error) 
 	if inc.Labels == nil {
 		inc.Labels = map[string]string{}
 	}
+	_ = json.Unmarshal([]byte(tags), &inc.Tags)
+	if inc.Tags == nil {
+		inc.Tags = []string{}
+	}
 	return &inc, nil
 }
 
@@ -56,17 +61,22 @@ func (s *Store) CreateIncident(ctx context.Context, inc *model.Incident) (*model
 	if inc.Labels == nil {
 		inc.Labels = map[string]string{}
 	}
+	if inc.Tags == nil {
+		inc.Tags = []string{}
+	}
 	labels, _ := json.Marshal(inc.Labels)
+	tags, _ := json.Marshal(inc.Tags)
 	ts := now()
 	if inc.CreatedAt.IsZero() {
 		inc.CreatedAt = timeParse(ts)
 	}
 	inc.UpdatedAt = inc.CreatedAt
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO incidents (external_id, source, host, severity, title, message, labels_json, status, solution, mr_url, root_cause, confidence, resolved_via, resolved_at, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO incidents (external_id, source, host, severity, title, message, labels_json, tags_json, owner, team, status, solution, mr_url, root_cause, confidence, resolved_via, resolved_at, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		inc.ExternalID, inc.Source, inc.Host, inc.Severity, inc.Title, inc.Message,
-		string(labels), inc.Status, inc.Solution, inc.MRURL, inc.RootCause, inc.Confidence, inc.ResolvedVia,
+		string(labels), string(tags), inc.Owner, inc.Team, inc.Status, inc.Solution,
+		inc.MRURL, inc.RootCause, inc.Confidence, inc.ResolvedVia,
 		formatResolvedAt(inc.ResolvedAt), inc.CreatedAt.Format(timeFmt), inc.UpdatedAt.Format(timeFmt))
 	if err != nil {
 		return nil, fmt.Errorf("create incident: %w", err)
@@ -114,6 +124,10 @@ func (s *Store) ListIncidentsFiltered(ctx context.Context, status, severity, que
 	if status != "" {
 		conds = append(conds, `status = ?`)
 		args = append(args, status)
+	} else {
+		// Soft-deleted incidents are hidden unless explicitly requested.
+		conds = append(conds, `status != ?`)
+		args = append(args, model.IncidentDeleted)
 	}
 	if severity != "" {
 		conds = append(conds, `severity = ?`)

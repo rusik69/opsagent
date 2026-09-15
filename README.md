@@ -34,8 +34,9 @@ host are allowlisted templates, and no command may modify the host.
   params. Shell metacharacters are rejected everywhere; commands run without a
   PTY and without a shell. Every run is persisted to an audit table.
 - **MCP server** (`internal/mcp`, built on `mark3labs/mcp-go`) — exposes the
-  tools the agent uses. Served in-process for the agent and over streamable
-  HTTP at `/mcp` for external MCP clients (e.g. opencode).
+  tools the agent uses, plus `incident://{id}` and `repo://{name}` resource
+  templates and a `diagnose` prompt. Served in-process for the agent and over
+  streamable HTTP at `/mcp` for external MCP clients (e.g. opencode).
 - **Agent** (`internal/agent`) — calls an OpenAI-compatible LLM which decides
   which allowlisted commands to run and which config to read, then writes a
   structured diagnosis report. At the end it reflects and may store a memory
@@ -65,7 +66,7 @@ host are allowlisted templates, and no command may modify the host.
 | `get_incident` / `list_incidents` | Incident context |
 | `get_related_incidents` / `correlate_incidents` | Incident correlation |
 | `set_incident_outcome` | Record root cause / confidence / resolved-via |
-| `get_incident_history` / `list_retrospectives` | Incident timeline + past reviews |
+| `get_incident_history` / `list_retrospectives` / `add_note` | Incident timeline + past reviews + operator notes |
 | `recall_memory` / `store_memory` | Persistent agent memory |
 | `store_instruction` / `list_instructions` / `apply_instruction` | Self-improvement instructions (apply marks one as incorporated) |
 
@@ -83,6 +84,10 @@ host are allowlisted templates, and no command may modify the host.
 | GET | `/api/v1/incidents/{id}/diagnosis` | Diagnosis report + command runs |
 | GET | `/api/v1/incidents/{id}/related` | Correlated incidents + groups |
 | GET | `/api/v1/incidents/{id}/events` | Incident timeline |
+| POST | `/api/v1/incidents/{id}/note` | Append an operator note |
+| DELETE | `/api/v1/incidents/{id}` | Soft-delete an incident |
+| POST | `/api/v1/incidents/bulk/status`, `/api/v1/incidents/bulk/delete` | Bulk status change / soft-delete |
+| GET | `/api/v1/stats` | Dashboard aggregates |
 | GET | `/api/v1/groups` / `/api/v1/groups/{id}` | Correlation groups |
 | POST | `/api/v1/correlate/run` | Run correlation now |
 | GET | `/api/v1/retrospectives` | Past self-improvement reviews |

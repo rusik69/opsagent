@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/rusik69/opsagent/internal/model"
 	"github.com/rusik69/opsagent/internal/store"
 )
 
@@ -234,5 +235,76 @@ func TestAlertmanagerPayloadCap(t *testing.T) {
 	}
 	if len(created) != maxAlertsPerPayload {
 		t.Fatalf("expected %d incidents (capped), got %d", maxAlertsPerPayload, len(created))
+	}
+}
+
+func TestAlertmanagerDedup(t *testing.T) {
+	st := openTestStore(t)
+	svc := NewService(st)
+	ctx := context.Background()
+	payload := AlertmanagerPayload{Status: "firing", Alerts: []Alertmanager{
+		{Status: "firing", Labels: map[string]string{"alertname": "HighCPU", "host": "web-01"}},
+	}}
+	first, err := svc.CreateAlertmanager(ctx, payload)
+	if err != nil || len(first) != 1 {
+		t.Fatalf("first delivery: %v (%d)", err, len(first))
+	}
+	// Re-delivery of the same firing alert must not create a duplicate.
+	second, err := svc.CreateAlertmanager(ctx, payload)
+	if err != nil || len(second) != 1 {
+		t.Fatalf("second delivery: %v (%d)", err, len(second))
+	}
+	if second[0].ID != first[0].ID {
+		t.Fatalf("expected same incident on re-delivery, got %d vs %d", second[0].ID, first[0].ID)
+	}
+	all, _ := st.ListIncidents(ctx, "", 10)
+	if len(all) != 1 {
+		t.Fatalf("expected 1 incident after dedup, got %d", len(all))
+	}
+}
+
+func TestAlertmanagerResolve(t *testing.T) {
+	st := openTestStore(t)
+	svc := NewService(st)
+	ctx := context.Background()
+	firing := AlertmanagerPayload{Status: "firing", Alerts: []Alertmanager{
+		{Status: "firing", Labels: map[string]string{"alertname": "HighCPU", "host": "web-01"}},
+	}}
+	created, err := svc.CreateAlertmanager(ctx, firing)
+	if err != nil || len(created) != 1 {
+		t.Fatalf("firing: %v (%d)", err, len(created))
+	}
+	id := created[0].ID
+	// The resolved alert must auto-resolve the open incident.
+	resolved := AlertmanagerPayload{Status: "firing", Alerts: []Alertmanager{
+		{Status: "resolved", Labels: map[string]string{"alertname": "HighCPU", "host": "web-01"}},
+	}}
+	if _, err := svc.CreateAlertmanager(ctx, resolved); err != nil {
+		t.Fatalf("resolved: %v", err)
+	}
+	inc, _ := st.GetIncident(ctx, id)
+	if inc.Status != model.IncidentResolved || inc.ResolvedVia != "auto" {
+		t.Fatalf("expected auto-resolved incident, got %+v", inc)
+	}
+}
+
+func TestGenericDedup(t *testing.T) {
+	st := openTestStore(t)
+	svc := NewService(st)
+	ctx := context.Background()
+	first, err := svc.CreateGeneric(ctx, GenericIncident{Host: "web-01", Title: "cpu", Source: "prometheus", ExternalID: "alert-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := svc.CreateGeneric(ctx, GenericIncident{Host: "web-01", Title: "cpu", Source: "prometheus", ExternalID: "alert-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("expected dedup to same incident, got %d vs %d", second.ID, first.ID)
+	}
+	all, _ := st.ListIncidents(ctx, "", 10)
+	if len(all) != 1 {
+		t.Fatalf("expected 1 incident after dedup, got %d", len(all))
 	}
 }

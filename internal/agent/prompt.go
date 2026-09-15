@@ -88,14 +88,25 @@ func (a *Agent) loadRulesFile() string {
 }
 
 func (a *Agent) incidentPrompt(inc *model.Incident) string {
-	return fmt.Sprintf(`Incident #%d to diagnose:
+	var sb strings.Builder
+	fmt.Fprintf(&sb, `Incident #%d to diagnose:
 - host: %s
 - severity: %s
 - title: %s
 - message: %s
 - labels: %v
-
-Diagnose this incident now.`, inc.ID, inc.Host, inc.Severity, inc.Title, inc.Message, inc.Labels)
+`, inc.ID, inc.Host, inc.Severity, inc.Title, inc.Message, inc.Labels)
+	if len(inc.Tags) > 0 {
+		fmt.Fprintf(&sb, "- tags: %v\n", inc.Tags)
+	}
+	if inc.Owner != "" {
+		fmt.Fprintf(&sb, "- owner: %s\n", inc.Owner)
+	}
+	if inc.Team != "" {
+		fmt.Fprintf(&sb, "- team: %s\n", inc.Team)
+	}
+	sb.WriteString("\nDiagnose this incident now.")
+	return sb.String()
 }
 
 // maxInjectedInstructions caps how many not-yet-applied instructions are

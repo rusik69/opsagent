@@ -157,6 +157,9 @@ CREATE TABLE IF NOT EXISTS retrospectives (
 	_, _ = s.db.Exec(`ALTER TABLE incidents ADD COLUMN confidence TEXT NOT NULL DEFAULT ''`)
 	_, _ = s.db.Exec(`ALTER TABLE incidents ADD COLUMN resolved_via TEXT NOT NULL DEFAULT ''`)
 	_, _ = s.db.Exec(`ALTER TABLE incidents ADD COLUMN resolved_at TEXT`)
+	_, _ = s.db.Exec(`ALTER TABLE incidents ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]'`)
+	_, _ = s.db.Exec(`ALTER TABLE incidents ADD COLUMN owner TEXT NOT NULL DEFAULT ''`)
+	_, _ = s.db.Exec(`ALTER TABLE incidents ADD COLUMN team TEXT NOT NULL DEFAULT ''`)
 
 	// Optional FTS5 index over memories for ranked full-text recall. If the
 	// driver does not support FTS5 the table creation fails and the store

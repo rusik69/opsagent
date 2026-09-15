@@ -2,6 +2,9 @@ package web
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -981,5 +984,143 @@ func TestApplyInstructionAPI(t *testing.T) {
 	items, err := ts.store.ListInstructions(context.Background(), 10)
 	if err != nil || len(items) != 1 || !items[0].Applied {
 		t.Fatalf("expected instruction marked applied, got %+v (%v)", items, err)
+	}
+}
+
+func TestNoteDeleteAndBulk(t *testing.T) {
+	ts := newTestServer(t)
+	ctx := context.Background()
+	a := ts.createIncident(t, "web-01", "cpu")
+	b := ts.createIncident(t, "web-02", "mem")
+
+	// Note.
+	resp, err := http.Post(ts.ts.URL+fmt.Sprintf("/api/v1/incidents/%d/note", a), "application/json",
+		strings.NewReader(`{"note":"oncall investigating"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("note: %d", resp.StatusCode)
+	}
+	events, _ := ts.store.ListEvents(ctx, a)
+	found := false
+	for _, e := range events {
+		if e.Kind == model.EventNote && e.Detail == "oncall investigating" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected note event, got %+v", events)
+	}
+
+	// Bulk status.
+	req, _ := http.NewRequest(http.MethodPost, ts.ts.URL+"/api/v1/incidents/bulk/status",
+		strings.NewReader(fmt.Sprintf(`{"ids":[%d,%d],"status":"resolved"}`, a, b)))
+	req.Header.Set("Content-Type", "application/json")
+	resp2, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("bulk status: %d", resp2.StatusCode)
+	}
+	for _, id := range []int64{a, b} {
+		inc, _ := ts.store.GetIncident(ctx, id)
+		if inc.Status != model.IncidentResolved {
+			t.Fatalf("expected %d resolved, got %q", id, inc.Status)
+		}
+	}
+
+	// Delete (soft) + bulk delete.
+	delReq, _ := http.NewRequest(http.MethodDelete, ts.ts.URL+fmt.Sprintf("/api/v1/incidents/%d", a), nil)
+	delResp, err := http.DefaultClient.Do(delReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delResp.Body.Close()
+	if delResp.StatusCode != http.StatusOK {
+		t.Fatalf("delete: %d", delResp.StatusCode)
+	}
+	inc, _ := ts.store.GetIncident(ctx, a)
+	if inc.Status != model.IncidentDeleted {
+		t.Fatalf("expected soft-deleted, got %q", inc.Status)
+	}
+}
+
+func TestStatsEndpoint(t *testing.T) {
+	ts := newTestServer(t)
+	ts.createIncident(t, "web-01", "cpu")
+	ts.createIncident(t, "web-02", "mem")
+	resp, err := http.Get(ts.ts.URL + "/api/v1/stats")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("stats: %d", resp.StatusCode)
+	}
+	var st struct {
+		Total int64 `json:"total"`
+		Open  int64 `json:"open"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
+		t.Fatal(err)
+	}
+	if st.Total != 2 || st.Open != 2 {
+		t.Fatalf("unexpected stats: %+v", st)
+	}
+}
+
+func TestWebhookHMAC(t *testing.T) {
+	cfg := config.Default()
+	cfg.Server.Listen = ":0"
+	cfg.Server.WebhookHMACSecret = "s3cret"
+	cfg.LLM.Enabled = false
+
+	st, _ := store.Open(t.TempDir() + "/hmac.db")
+	defer st.Close()
+	al, _ := sshx.NewAllowlist(sshx.DefaultAllowlist())
+	executor := sshx.NewExecutor(al, &sshx.FakeRunner{}, st)
+	resolver := sshx.HostsFromTargets(nil)
+	rm, _ := repos.NewManager(nil, t.TempDir())
+	mcpSrv, _ := mcp.NewServer("t", "0", mcp.Deps{Executor: executor, Repos: rm, Store: st, Resolver: resolver})
+	ag := agent.New(agent.NewClient("http://127.0.0.1:1/v1", "", "m"), mcpSrv, st, agent.Options{})
+	ws, err := New(cfg, st, executor, resolver, rm, mcpSrv, ag, incidents.NewService(st), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(ws.Handler())
+	defer ts.Close()
+
+	body := `{"host":"web-01","title":"t","severity":"warning"}`
+	sign := func(key string, payload []byte) string {
+		mac := hmac.New(sha256.New, []byte(key))
+		mac.Write(payload)
+		return hex.EncodeToString(mac.Sum(nil))
+	}
+
+	// Missing signature -> 401.
+	resp, err := http.Post(ts.URL+"/api/v1/incidents", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without signature, got %d", resp.StatusCode)
+	}
+
+	// Correct signature -> 201.
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/incidents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Webhook-Signature", sign("s3cret", []byte(body)))
+	resp2, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 with signature, got %d", resp2.StatusCode)
 	}
 }

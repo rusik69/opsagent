@@ -31,6 +31,9 @@ type ServerConfig struct {
 	APIKey         string `yaml:"api_key"`
 	APIKeyReadOnly string `yaml:"api_key_readonly"`
 	APIKeyWebhook  string `yaml:"api_key_webhook"`
+	// WebhookHMACSecret, when set, requires intake webhooks to sign the raw
+	// body with HMAC-SHA256 in the X-Webhook-Signature header (hex).
+	WebhookHMACSecret string `yaml:"webhook_hmac_secret"`
 }
 
 type StorageConfig struct {
@@ -43,6 +46,9 @@ type MaintenanceConfig struct {
 	// RepoSyncMinutes periodically pulls the configured git repos
 	// (0 disables the periodic sync; the initial boot sync still runs).
 	RepoSyncMinutes int `yaml:"repos_sync_minutes"`
+	// AutoCloseHours auto-closes open/diagnosing incidents older than this
+	// many hours (0 disables stale-incident auto-close).
+	AutoCloseHours int `yaml:"auto_close_hours"`
 }
 
 type SSHConfig struct {
@@ -120,6 +126,8 @@ type CorrelateConfig struct {
 	WindowMinutes   int      `yaml:"window_minutes"`
 	IntervalMinutes int      `yaml:"interval_minutes"`
 	Methods         []string `yaml:"methods"`
+	// LabelKeys are the label keys used by the "label" correlation method.
+	LabelKeys []string `yaml:"label_keys"`
 }
 
 // ReviewConfig controls the self-improvement review loop.

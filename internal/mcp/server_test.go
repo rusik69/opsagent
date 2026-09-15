@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/rusik69/opsagent/internal/config"
 	"github.com/rusik69/opsagent/internal/correlate"
 	"github.com/rusik69/opsagent/internal/gitlab"
@@ -515,5 +517,91 @@ func TestStoreMemoryDedup(t *testing.T) {
 	mems, err := st.ListMemories(ctx, 10)
 	if err != nil || len(mems) != 1 {
 		t.Fatalf("expected exactly 1 memory, got %d (%v)", len(mems), err)
+	}
+}
+
+func TestAddNote(t *testing.T) {
+	deps, st := newTestDeps(t)
+	srv, err := NewServer("test", "0.0.0", deps)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	ctx := context.Background()
+	inc, _ := st.CreateIncident(ctx, &model.Incident{Host: "web-01", Title: "x", Status: model.IncidentOpen})
+	out, err := srv.CallText(ctx, "add_note", map[string]any{"incident_id": float64(inc.ID), "note": "escalated"})
+	if err != nil {
+		t.Fatalf("add_note: %v", err)
+	}
+	if !strings.Contains(out, "note added") {
+		t.Fatalf("unexpected output: %s", out)
+	}
+	has, _ := st.HasEvent(ctx, inc.ID, model.EventNote)
+	if !has {
+		t.Fatal("expected note event")
+	}
+}
+
+func TestResourcesAndPromptRegistered(t *testing.T) {
+	deps, st := newTestDeps(t)
+	srv, err := NewServer("test", "0.0.0", deps)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	ctx := context.Background()
+	inc, _ := st.CreateIncident(ctx, &model.Incident{Host: "web-01", Title: "high cpu", Status: model.IncidentOpen})
+
+	if _, ok := srv.MCPServer().ListPrompts()["diagnose"]; !ok {
+		t.Fatal("expected diagnose prompt registered")
+	}
+
+	// resources/read of the incident resource template.
+	req := mcp.JSONRPCRequest{
+		JSONRPC: mcp.JSONRPC_VERSION,
+		ID:      mcp.NewRequestId(2),
+		Params:  mcp.ReadResourceParams{URI: fmt.Sprintf("incident://%d", inc.ID)},
+	}
+	req.Method = string(mcp.MethodResourcesRead)
+	raw, _ := json.Marshal(req)
+	resp := srv.MCPServer().HandleMessage(ctx, raw)
+	if r, ok := resp.(mcp.JSONRPCResponse); ok {
+		data, _ := json.Marshal(r.Result)
+		var rr struct {
+			Contents []mcp.TextResourceContents `json:"contents"`
+		}
+		if err := json.Unmarshal(data, &rr); err != nil {
+			t.Fatalf("read resource result: %v", err)
+		}
+		if len(rr.Contents) == 0 || !strings.Contains(rr.Contents[0].Text, "high cpu") {
+			t.Fatalf("unexpected resource contents: %+v", rr.Contents)
+		}
+	} else {
+		t.Fatalf("unexpected response type %T", resp)
+	}
+
+	// prompts/get of the diagnose prompt.
+	preq := mcp.JSONRPCRequest{
+		JSONRPC: mcp.JSONRPC_VERSION,
+		ID:      mcp.NewRequestId(3),
+		Params:  mcp.GetPromptParams{Name: "diagnose", Arguments: map[string]string{"incident_id": fmt.Sprintf("%d", inc.ID)}},
+	}
+	preq.Method = string(mcp.MethodPromptsGet)
+	praw, _ := json.Marshal(preq)
+	presp := srv.MCPServer().HandleMessage(ctx, praw)
+	if r, ok := presp.(mcp.JSONRPCResponse); ok {
+		data, _ := json.Marshal(r.Result)
+		var pr struct {
+			Messages []struct {
+				Role    string          `json:"role"`
+				Content mcp.TextContent `json:"content"`
+			} `json:"messages"`
+		}
+		if err := json.Unmarshal(data, &pr); err != nil {
+			t.Fatalf("get prompt result: %v", err)
+		}
+		if len(pr.Messages) == 0 || !strings.Contains(pr.Messages[0].Content.Text, "high cpu") {
+			t.Fatalf("expected prompt messages, got %+v", pr)
+		}
+	} else {
+		t.Fatalf("unexpected response type %T", presp)
 	}
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -133,6 +134,9 @@ func main() {
 		if len(cfg.Correlate.Methods) > 0 {
 			corrCfg.Methods = cfg.Correlate.Methods
 		}
+		if len(cfg.Correlate.LabelKeys) > 0 {
+			corrCfg.LabelKeys = cfg.Correlate.LabelKeys
+		}
 		corr = correlate.NewEngine(st, corrCfg)
 	}
 
@@ -258,6 +262,28 @@ func main() {
 				log.Printf("repos sync: %v", err)
 			} else {
 				log.Printf("repos sync:\n%s", out)
+			}
+		}))
+	}
+
+	// Stale incidents: auto-close open/diagnosing incidents older than
+	// maintenance.auto_close_hours.
+	if cfg.Maintenance.AutoCloseHours > 0 {
+		startTicker(30*time.Minute, true, withCtx(2*time.Minute, func(ctx context.Context) {
+			cutoff := time.Now().UTC().Add(-time.Duration(cfg.Maintenance.AutoCloseHours) * time.Hour)
+			stale, err := st.ListStaleIncidents(ctx, cutoff, 500)
+			if err != nil {
+				log.Printf("auto-close: %v", err)
+				return
+			}
+			for _, inc := range stale {
+				if err := st.UpdateIncidentStatus(ctx, inc.ID, model.IncidentCancelled); err != nil {
+					log.Printf("auto-close: #%d: %v", inc.ID, err)
+					continue
+				}
+				_, _ = st.AddEvent(ctx, inc.ID, model.EventCancelled,
+					fmt.Sprintf("auto-closed after %d hours without resolution", cfg.Maintenance.AutoCloseHours))
+				log.Printf("auto-close: incident #%d closed (stale)", inc.ID)
 			}
 		}))
 	}

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/rusik69/opsagent/internal/model"
 )
@@ -266,5 +267,72 @@ func TestMemoryFTSAndLIKE(t *testing.T) {
 	dup, err := s.MemoryContentExists(ctx, "check error.log first when nginx returns 502")
 	if err != nil || !dup {
 		t.Fatalf("expected duplicate detection (dup=%v err=%v)", dup, err)
+	}
+}
+
+func TestBulkDeleteAndFindOpen(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+	a := seedIncident(t, s, "web-01", "cpu", "warning")
+	b := seedIncident(t, s, "web-02", "mem", "warning")
+
+	// FindOpenIncidentByExternal.
+	inc, _ := s.CreateIncident(ctx, &model.Incident{Source: "prom", ExternalID: "e1", Host: "web-01", Title: "x", Status: model.IncidentOpen})
+	found, err := s.FindOpenIncidentByExternal(ctx, "prom", "e1", "web-01")
+	if err != nil || found == nil || found.ID != inc.ID {
+		t.Fatalf("find open: %v %+v", err, found)
+	}
+
+	// Bulk status.
+	n, err := s.BulkUpdateStatus(ctx, []int64{a.ID, b.ID}, model.IncidentResolved)
+	if err != nil || n != 2 {
+		t.Fatalf("bulk status: %v (%d)", err, n)
+	}
+	for _, id := range []int64{a.ID, b.ID} {
+		g, _ := s.GetIncident(ctx, id)
+		if g.Status != model.IncidentResolved {
+			t.Fatalf("expected %d resolved, got %q", id, g.Status)
+		}
+	}
+
+	// Soft delete hides from default list.
+	if err := s.DeleteIncident(ctx, a.ID); err != nil {
+		t.Fatal(err)
+	}
+	list, _ := s.ListIncidents(ctx, "", 10)
+	for _, g := range list {
+		if g.ID == a.ID {
+			t.Fatal("expected deleted incident hidden from list")
+		}
+	}
+}
+
+func TestStaleIncidents(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+	old := time.Now().UTC().Add(-48 * time.Hour)
+	_, _ = s.CreateIncident(ctx, &model.Incident{Host: "web-01", Title: "old", Status: model.IncidentOpen, CreatedAt: old})
+	_, _ = s.CreateIncident(ctx, &model.Incident{Host: "web-01", Title: "fresh", Status: model.IncidentOpen})
+	stale, err := s.ListStaleIncidents(ctx, time.Now().UTC().Add(-24*time.Hour), 10)
+	if err != nil || len(stale) != 1 || stale[0].Title != "old" {
+		t.Fatalf("stale incidents: %v %+v", err, stale)
+	}
+}
+
+func TestIncidentStats(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+	seedIncident(t, s, "web-01", "cpu", "critical")
+	seedIncident(t, s, "web-02", "mem", "warning")
+	seedIncident(t, s, "web-01", "disk", "warning")
+	st, err := s.IncidentStats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Total != 3 || st.Open != 3 || st.Critical != 1 {
+		t.Fatalf("unexpected stats: %+v", st)
+	}
+	if len(st.PerHost) != 2 {
+		t.Fatalf("expected 2 hosts, got %+v", st.PerHost)
 	}
 }

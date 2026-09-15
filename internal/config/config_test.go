@@ -179,3 +179,31 @@ gitlab:
 		t.Errorf("expected file-backed token, got %q", cfg.GitLab.Token)
 	}
 }
+
+func TestNewMaintenanceAndCorrelateFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	content := `
+server:
+  webhook_hmac_secret: "abc"
+correlate:
+  label_keys: [cluster, zone]
+maintenance:
+  auto_close_hours: 12
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Server.WebhookHMACSecret != "abc" {
+		t.Errorf("expected webhook secret, got %q", cfg.Server.WebhookHMACSecret)
+	}
+	if len(cfg.Correlate.LabelKeys) != 2 || cfg.Correlate.LabelKeys[0] != "cluster" {
+		t.Errorf("label_keys: %v", cfg.Correlate.LabelKeys)
+	}
+	if cfg.Maintenance.AutoCloseHours != 12 {
+		t.Errorf("auto_close_hours: %d", cfg.Maintenance.AutoCloseHours)
+	}
+}

@@ -10,7 +10,27 @@
   <div class="stat"><div class="num">{{.Open}}</div><div class="label">Open</div></div>
   <div class="stat"><div class="num">{{.Critical}}</div><div class="label">Critical</div></div>
   <div class="stat"><div class="num">{{.NeedsReview}}</div><div class="label">Diagnosed, no MR</div></div>
+  {{if .Stats}}<div class="stat"><div class="num">{{.Stats.Resolved}}</div><div class="label">Resolved</div></div>
+  <div class="stat"><div class="num">{{.Stats.Recurrences}}</div><div class="label">Recurrences</div></div>
+  <div class="stat"><div class="num">{{.Stats.Error}}</div><div class="label">Diagnosis errors</div></div>
+  {{if .Stats.AvgDiagnosisMS}}<div class="stat"><div class="num">{{.Stats.AvgDiagnosisMS}}ms</div><div class="label">Avg command</div></div>{{end}}{{end}}
 </div>
+
+{{if .Stats}}
+<h2>Incidents by host</h2>
+<div class="panel">
+<table>
+  <thead><tr><th>Host</th><th>Incidents</th></tr></thead>
+  <tbody>
+  {{range .Stats.PerHost}}
+    <tr><td>{{.Host}}</td><td>{{.Count}}</td></tr>
+  {{else}}
+    <tr><td colspan="2" class="muted">No data.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+</div>
+{{end}}
 
 <h2>Recent incidents</h2>
 <div class="panel">
