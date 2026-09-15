@@ -1,0 +1,4 @@
+2026-01-08 09:40:00.123 UTC [2103] FATAL:  could not create shared memory segment: No space left on device
+2026-01-08 09:40:00.124 UTC [2103] DETAIL:  Failed system call shmget(key=1, size=33554432): No space left on device
+2026-01-08 09:40:00.125 UTC [2103] HINT:  This error usually means that PostgreSQL's request for a shared memory segment exceeded available memory or swap space.
+2026-01-08 09:40:00.200 UTC [2103] LOG:  database system is shut down

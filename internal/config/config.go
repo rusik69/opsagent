@@ -197,7 +197,9 @@ func (c *Config) expandSecrets() {
 	c.Server.APIKeyReadOnly = resolveSecret(c.Server.APIKeyReadOnly)
 	c.Server.APIKeyWebhook = resolveSecret(c.Server.APIKeyWebhook)
 	c.LLM.APIKey = resolveSecret(c.LLM.APIKey)
+	c.LLM.BaseURL = resolveSecret(c.LLM.BaseURL)
 	c.GitLab.Token = resolveSecret(c.GitLab.Token)
+	c.GitLab.BaseURL = resolveSecret(c.GitLab.BaseURL)
 	c.SSH.PrivateKey = resolveSecret(c.SSH.PrivateKey)
 }
 

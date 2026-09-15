@@ -143,24 +143,36 @@ solution summary once one exists.
 ## Kubernetes demo
 
 A self-contained demo shows the full pipeline with a single make target. It
-needs `kind` and `kubectl`, builds the image, creates a cluster, and deploys:
+needs `kind` and `kubectl`, builds the images, creates a cluster, and deploys
+a setup that mirrors production:
 
 - **opsagent** with test config repos (Ansible/Puppet/docs) from a ConfigMap
-- a **test host** (sshd) the agent actually runs read-only commands on
-- a **scripted mock LLM** that drives a realistic diagnosis (uptime → host
-  config → docs search → report)
-- a **seed script** that ingests test incidents and triggers a diagnosis
+- **two test hosts** (`demo-web`, `demo-db`) with a genuine, discoverable
+  fault: web-01 runs nginx with a broken config (so `nginx -t` and
+  `systemctl status nginx` fail), db-01 has a failed postgres start
+- an **in-memory fake GitLab** so `create_gitlab_mr` and MR-merge polling work
+- a **grounded mock LLM** that runs the same read-only commands a real model
+  would and writes a report using the actual tool outputs
+- a **seed script** that runs the whole lifecycle end-to-end
 
 ```sh
-make k8s-demo     # build, deploy, port-forward, seed, diagnose
+make k8s-demo     # build, deploy, port-forward, run the full demo loop
 make k8s-down     # tear down the cluster
 ```
 
-Then open http://localhost:8080 (dashboard) or use the API:
-`POST /api/v1/incidents/{id}/diagnose`, `GET /api/v1/incidents/{id}/diagnosis`.
+`make k8s-demo` prints, in order: the fired alert burst and its correlation
+groups, the diagnosis report and command runs (real SSH output), the GitLab MR
+the agent proposes, the incident resolving `via=mr_merged` after the MR is
+merged, and the `recurrence` event when the same alert re-fires.
+
+The mock LLM is the offline default. To use a real OpenAI-compatible model,
+set `llm.base_url` (and `llm.api_key` if needed) in
+`deploy/k8s/01-config.yaml` and re-run `make k8s-demo`.
 
 > The committed `deploy/demo/keys` keypair and `deploy/k8s/02-secret.yaml`
-> are throwaway demo credentials, never for production.
+> are throwaway demo credentials, never for production. The test hosts ship
+> minimal `systemctl`/`journalctl` shims (containers have no systemd) that
+> only report the two demo services; every other command returns real output.
 
 ## Security notes
 

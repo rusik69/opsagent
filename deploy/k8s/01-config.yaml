@@ -17,9 +17,18 @@ data:
       known_hosts: "insecure"
       hosts:
         - name: web-01
-          address: test-host
+          address: demo-web
           user: ops
           port: 22
+        - name: db-01
+          address: demo-db
+          user: ops
+          port: 22
+    allowlist:
+      commands:
+        - id: nginx_conf_test
+          description: "nginx configuration syntax check (read-only)"
+          template: "nginx -t"
     repos:
       - {name: ansible, type: ansible, path: /repos/ansible}
       - {name: puppet, type: puppet, path: /repos/puppet}
@@ -29,8 +38,15 @@ data:
       base_url: "http://mockllm:8081/v1"
       api_key: ""
       model: "demo"
-      max_steps: 8
-      timeout_secs: 60
+      max_steps: 12
+      timeout_secs: 90
+    gitlab:
+      base_url: "http://gitlab"
+      token: "demo-token"
+      default_project_id: "acme/infra"
+      source_branch_prefix: "opsagent-fix"
+      target_branch: "main"
+      poll_mr_seconds: 10
     agent:
       instructions_file: "/app/agent-rules.md"
       max_concurrent: 2
@@ -43,7 +59,9 @@ data:
     mcp:
       expose_http: true
 ---
-# Demo config repos (ansible/puppet/docs) mounted under /repos.
+# Demo config repos (ansible/puppet/docs) mounted under /repos. These define the
+# EXPECTED state; the demo hosts deliberately contradict it so the agent finds
+# a real root cause by comparing observed state against config.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -62,17 +80,33 @@ data:
     worker_processes: 4
     mem_limit: 4g
     role: web
-  "ansible/roles/nginx/tasks/main.yml": |
+  "ansible/host_vars/db-01.yml": |
     ---
-    - name: ensure nginx is installed
-      ansible.builtin.package:
-        name: nginx
-        state: present
-    - name: deploy nginx config
-      ansible.builtin.template:
-        src: nginx.conf.j2
-        dest: /etc/nginx/nginx.conf
-      notify: reload nginx
+    postgres_version: 15
+    max_connections: 200
+    shared_buffers: 256MB
+    shared_memory_type: mmap
+    role: database
+  "ansible/roles/nginx/templates/nginx.conf.j2": |
+    worker_processes {{ worker_processes }};
+
+    events {
+        worker_connections 1024;
+    }
+
+    http {
+        include /etc/nginx/mime.types;
+        default_type application/octet-stream;
+        server {
+            listen {{ nginx_port }};
+            server_name {{ inventory_hostname }}.example.com;
+            root /var/www/html;
+        }
+    }
+  "ansible/roles/postgres/templates/postgresql.conf": |
+    max_connections = {{ max_connections }}
+    shared_buffers = {{ shared_buffers }}
+    shared_memory_type = {{ shared_memory_type }}
   "puppet/nodes/web-01.pp": |
     node 'web-01' {
       include ::nginx
@@ -81,6 +115,15 @@ data:
       }
       package { 'curl':
         ensure => installed,
+      }
+    }
+  "puppet/nodes/db-01.pp": |
+    node 'db-01' {
+      class { 'postgresql::server':
+        version          => '15',
+        max_connections  => 200,
+        shared_buffers   => '256MB',
+        shared_memory_type => 'mmap',
       }
     }
   "puppet/hieradata/web-01.yaml": |
@@ -94,12 +137,20 @@ data:
     When nginx returns 502/504 or high load is reported:
 
     1. Check /var/log/nginx/error.log first.
-    2. Verify the upstream backend is reachable: `ss -tulpn` on the host.
-    3. Compare the running config with the ansible template in
-       `roles/nginx/templates/nginx.conf.j2`.
-    4. A worker_processes mismatch with the CPU count often causes slowness.
+    2. Verify the backend is reachable: `ss -tulpn` on the host.
+    3. Run `nginx -t`; a failed config test means a directive is wrong
+       (often in a file under /etc/nginx/conf.d/).
+    4. Compare the running config with the ansible template
+       `roles/nginx/templates/nginx.conf.j2`; worker_processes should match
+       the CPU count.
+    5. Remove the offending directive, re-run `nginx -t`, then reload.
   "docs/postgres-tuning.md": |
     # Postgres tuning
 
-    Connection pool exhaustion is the most common cause of latency spikes.
-    Check `max_connections` against pool size before scaling hardware.
+    Connection pool exhaustion and startup failures are the most common issues:
+
+    1. Check `/var/log/postgresql/postgresql.log` for FATAL lines.
+    2. `FATAL: could not create shared memory segment` means the kernel
+       shared memory settings are too small for `shared_buffers`.
+    3. Raise `shared_buffers` or switch `shared_memory_type` to `mmap`.
+    4. Verify `free -h` and `/dev/shm` sizing before restarting postgres.

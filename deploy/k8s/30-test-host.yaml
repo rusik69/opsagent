@@ -1,29 +1,29 @@
-# Demo test host: a plain sshd the agent diagnoses. The opsagent demo private
-# key is authorized here via the demo-ssh-pub ConfigMap.
+# Demo test hosts: two sshd instances running the same demo-host image. web-01
+# has nginx with a broken config (nginx -t fails, service down); db-01 has a
+# failed postgres start (shared memory). The opsagent demo key is authorized on
+# both via the demo-ssh-pub ConfigMap.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: test-host
+  name: demo-web
   namespace: opsagent
   labels:
-    app: test-host
+    app: demo-web
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: test-host
+      app: demo-web
   template:
     metadata:
       labels:
-        app: test-host
+        app: demo-web
     spec:
       containers:
         - name: sshd
-          image: panubo/sshd:latest
+          image: demo-host:dev
           ports:
             - {name: ssh, containerPort: 22}
-          env:
-            - {name: SSH_USERS, value: "ops:1000:1000"}
           volumeMounts:
             - {name: authkeys, mountPath: /etc/authorized_keys, readOnly: true}
             - {name: hostkeys, mountPath: /etc/ssh/keys}
@@ -37,10 +37,53 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: test-host
+  name: demo-web
   namespace: opsagent
 spec:
   selector:
-    app: test-host
+    app: demo-web
+  ports:
+    - {name: ssh, port: 22, targetPort: 22}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-db
+  namespace: opsagent
+  labels:
+    app: demo-db
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: demo-db
+  template:
+    metadata:
+      labels:
+        app: demo-db
+    spec:
+      containers:
+        - name: sshd
+          image: demo-host:dev
+          ports:
+            - {name: ssh, containerPort: 22}
+          volumeMounts:
+            - {name: authkeys, mountPath: /etc/authorized_keys, readOnly: true}
+            - {name: hostkeys, mountPath: /etc/ssh/keys}
+      volumes:
+        - name: authkeys
+          configMap:
+            name: demo-ssh-pub
+        - name: hostkeys
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo-db
+  namespace: opsagent
+spec:
+  selector:
+    app: demo-db
   ports:
     - {name: ssh, port: 22, targetPort: 22}

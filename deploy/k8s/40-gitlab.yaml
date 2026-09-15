@@ -1,0 +1,38 @@
+# In-memory fake GitLab used by the demo so create_gitlab_mr and the MR merge
+# poller work without a real GitLab instance.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gitlab
+  namespace: opsagent
+  labels:
+    app: gitlab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gitlab
+  template:
+    metadata:
+      labels:
+        app: gitlab
+    spec:
+      containers:
+        - name: mockgitlab
+          image: opsagent:dev
+          command: ["/app/mockgitlab"]
+          ports:
+            - {name: http, containerPort: 8080}
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gitlab
+  namespace: opsagent
+spec:
+  selector:
+    app: gitlab
+  ports:
+    - {name: http, port: 80, targetPort: 8080}
