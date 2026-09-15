@@ -1,0 +1,75 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: opsagent-data
+  namespace: opsagent
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opsagent
+  namespace: opsagent
+  labels:
+    app: opsagent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: opsagent
+  template:
+    metadata:
+      labels:
+        app: opsagent
+    spec:
+      containers:
+        - name: opsagent
+          image: opsagent:dev
+          ports:
+            - {name: http, containerPort: 8080}
+          args: ["-config", "/etc/opsagent/config.yaml"]
+          readinessProbe:
+            httpGet: {path: /readyz, port: 8080}
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: 8080}
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          volumeMounts:
+            - {name: config, mountPath: /etc/opsagent}
+            - {name: sshkey, mountPath: /etc/ssh-keys, readOnly: true}
+            - {name: repos, mountPath: /repos}
+            - {name: data, mountPath: /data}
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 512Mi}
+      volumes:
+        - name: config
+          configMap:
+            name: opsagent-config
+        - name: sshkey
+          secret:
+            secretName: demo-ssh
+            defaultMode: 0400
+        - name: repos
+          configMap:
+            name: demo-repos
+        - name: data
+          persistentVolumeClaim:
+            claimName: opsagent-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: opsagent
+  namespace: opsagent
+spec:
+  selector:
+    app: opsagent
+  ports:
+    - {name: http, port: 8080, targetPort: 8080}

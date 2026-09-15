@@ -1,0 +1,46 @@
+# Demo test host: a plain sshd the agent diagnoses. The opsagent demo private
+# key is authorized here via the demo-ssh-pub ConfigMap.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-host
+  namespace: opsagent
+  labels:
+    app: test-host
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: test-host
+  template:
+    metadata:
+      labels:
+        app: test-host
+    spec:
+      containers:
+        - name: sshd
+          image: panubo/sshd:latest
+          ports:
+            - {name: ssh, containerPort: 22}
+          env:
+            - {name: SSH_USERS, value: "ops:1000:1000"}
+          volumeMounts:
+            - {name: authkeys, mountPath: /etc/authorized_keys, readOnly: true}
+            - {name: hostkeys, mountPath: /etc/ssh/keys}
+      volumes:
+        - name: authkeys
+          configMap:
+            name: demo-ssh-pub
+        - name: hostkeys
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: test-host
+  namespace: opsagent
+spec:
+  selector:
+    app: test-host
+  ports:
+    - {name: ssh, port: 22, targetPort: 22}

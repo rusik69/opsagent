@@ -4,7 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -32,20 +32,23 @@ func main() {
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		log.Fatalf("config: %v", err)
+		slog.Error(fmt.Sprintf("config: %v", err))
+		os.Exit(1)
 	}
 
 	// Storage.
 	st, err := store.Open(cfg.Storage.Path)
 	if err != nil {
-		log.Fatalf("storage: %v", err)
+		slog.Error(fmt.Sprintf("storage: %v", err))
+		os.Exit(1)
 	}
 	defer st.Close()
 
 	// SSH allowlist + executor.
 	al, err := sshx.NewAllowlist(sshx.DefaultAllowlist())
 	if err != nil {
-		log.Fatalf("allowlist: %v", err)
+		slog.Error(fmt.Sprintf("allowlist: %v", err))
+		os.Exit(1)
 	}
 	if len(cfg.Allowlist.Commands) > 0 {
 		extra := make([]sshx.Command, 0, len(cfg.Allowlist.Commands))
@@ -55,7 +58,8 @@ func main() {
 		merged := append(sshx.DefaultAllowlist(), extra...)
 		al, err = sshx.NewAllowlist(merged)
 		if err != nil {
-			log.Fatalf("allowlist: %v", err)
+			slog.Error(fmt.Sprintf("allowlist: %v", err))
+			os.Exit(1)
 		}
 	}
 
@@ -72,7 +76,7 @@ func main() {
 
 	var runner sshx.Runner
 	if len(targets) == 0 {
-		log.Printf("warning: no hosts configured; using fake runner (all commands return empty)")
+		slog.Warn(fmt.Sprintf("warning: no hosts configured; using fake runner (all commands return empty)"))
 		runner = &sshx.FakeRunner{Outputs: map[string]string{}}
 	} else {
 		sshClient, err := sshx.NewSSHClient(sshx.Options{
@@ -84,7 +88,8 @@ func main() {
 			Resolver:       resolver,
 		})
 		if err != nil {
-			log.Fatalf("ssh: %v", err)
+			slog.Error(fmt.Sprintf("ssh: %v", err))
+			os.Exit(1)
 		}
 		defer sshClient.Close()
 		runner = sshClient
@@ -95,16 +100,17 @@ func main() {
 	// Repos.
 	reposMgr, err := repos.NewManager(cfg.Repos, "./data/repos")
 	if err != nil {
-		log.Fatalf("repos: %v", err)
+		slog.Error(fmt.Sprintf("repos: %v", err))
+		os.Exit(1)
 	}
 	{
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		out, err := reposMgr.Sync(ctx)
 		cancel()
 		if err != nil {
-			log.Printf("repos initial sync: %v", err)
+			slog.Info(fmt.Sprintf("repos initial sync: %v", err))
 		} else {
-			log.Printf("repos sync:\n%s", out)
+			slog.Info(fmt.Sprintf("repos sync:\n%s", out))
 		}
 	}
 
@@ -119,9 +125,9 @@ func main() {
 		if cfg.GitLab.TargetBranch != "" {
 			gl.TargetBranch = cfg.GitLab.TargetBranch
 		}
-		log.Printf("gitlab configured: %s", cfg.GitLab.BaseURL)
+		slog.Info(fmt.Sprintf("gitlab configured: %s", cfg.GitLab.BaseURL))
 	} else {
-		log.Printf("warning: gitlab not configured; create_gitlab_mr tool will be unavailable")
+		slog.Warn(fmt.Sprintf("warning: gitlab not configured; create_gitlab_mr tool will be unavailable"))
 	}
 
 	// Correlation engine.
@@ -150,9 +156,10 @@ func main() {
 		Correlate: corr,
 	})
 	if err != nil {
-		log.Fatalf("mcp: %v", err)
+		slog.Error(fmt.Sprintf("mcp: %v", err))
+		os.Exit(1)
 	}
-	log.Printf("MCP tools: %d registered", len(mcpSrv.MCPServer().ListTools()))
+	slog.Info(fmt.Sprintf("MCP tools: %d registered", len(mcpSrv.MCPServer().ListTools())))
 
 	// Agent.
 	llm := agent.NewClient(cfg.LLM.BaseURL, cfg.LLM.APIKey, cfg.LLM.Model)
@@ -171,7 +178,8 @@ func main() {
 	// Web server.
 	ws, err := web.New(cfg, st, executor, resolver, reposMgr, mcpSrv, ag, inc, corr)
 	if err != nil {
-		log.Fatalf("web: %v", err)
+		slog.Error(fmt.Sprintf("web: %v", err))
+		os.Exit(1)
 	}
 
 	// Self-improvement reviewer (background interval + manual API trigger).
@@ -225,9 +233,9 @@ func main() {
 		startTicker(interval, true, withCtx(5*time.Minute, func(ctx context.Context) {
 			retro, err := rv.Run(ctx)
 			if err != nil {
-				log.Printf("review: %v", err)
+				slog.Info(fmt.Sprintf("review: %v", err))
 			} else if retro != nil {
-				log.Printf("review: %d incidents reviewed, %d memories, %d instructions", retro.IncidentsReviewd, retro.MemoriesCreated, retro.InstructionsCreated)
+				slog.Info(fmt.Sprintf("review: %d incidents reviewed, %d memories, %d instructions", retro.IncidentsReviewd, retro.MemoriesCreated, retro.InstructionsCreated))
 			}
 		}))
 	}
@@ -240,7 +248,7 @@ func main() {
 		}
 		startTicker(interval, true, withCtx(2*time.Minute, func(ctx context.Context) {
 			if err := corr.Run(ctx); err != nil {
-				log.Printf("correlation: %v", err)
+				slog.Info(fmt.Sprintf("correlation: %v", err))
 			}
 		}))
 	}
@@ -259,9 +267,9 @@ func main() {
 		interval := time.Duration(cfg.Maintenance.RepoSyncMinutes) * time.Minute
 		startTicker(interval, false, withCtx(5*time.Minute, func(ctx context.Context) {
 			if out, err := reposMgr.Sync(ctx); err != nil {
-				log.Printf("repos sync: %v", err)
+				slog.Info(fmt.Sprintf("repos sync: %v", err))
 			} else {
-				log.Printf("repos sync:\n%s", out)
+				slog.Info(fmt.Sprintf("repos sync:\n%s", out))
 			}
 		}))
 	}
@@ -273,17 +281,17 @@ func main() {
 			cutoff := time.Now().UTC().Add(-time.Duration(cfg.Maintenance.AutoCloseHours) * time.Hour)
 			stale, err := st.ListStaleIncidents(ctx, cutoff, 500)
 			if err != nil {
-				log.Printf("auto-close: %v", err)
+				slog.Info(fmt.Sprintf("auto-close: %v", err))
 				return
 			}
 			for _, inc := range stale {
 				if err := st.UpdateIncidentStatus(ctx, inc.ID, model.IncidentCancelled); err != nil {
-					log.Printf("auto-close: #%d: %v", inc.ID, err)
+					slog.Info(fmt.Sprintf("auto-close: #%d: %v", inc.ID, err))
 					continue
 				}
 				_, _ = st.AddEvent(ctx, inc.ID, model.EventCancelled,
 					fmt.Sprintf("auto-closed after %d hours without resolution", cfg.Maintenance.AutoCloseHours))
-				log.Printf("auto-close: incident #%d closed (stale)", inc.ID)
+				slog.Info(fmt.Sprintf("auto-close: incident #%d closed (stale)", inc.ID))
 			}
 		}))
 	}
@@ -294,9 +302,9 @@ func main() {
 			cutoff := time.Now().UTC().Add(-time.Duration(cfg.Storage.RetentionDays) * 24 * time.Hour)
 			runs, evs, err := st.PruneOlderThan(ctx, cutoff)
 			if err != nil {
-				log.Printf("retention: %v", err)
+				slog.Info(fmt.Sprintf("retention: %v", err))
 			} else if runs+evs > 0 {
-				log.Printf("retention: pruned %d command runs, %d events", runs, evs)
+				slog.Info(fmt.Sprintf("retention: pruned %d command runs, %d events", runs, evs))
 			}
 		}))
 	}
@@ -310,10 +318,11 @@ func main() {
 	select {
 	case err := <-srvErr:
 		if err != nil && err != http.ErrServerClosed {
-			log.Fatalf("server: %v", err)
+			slog.Error(fmt.Sprintf("server: %v", err))
+			os.Exit(1)
 		}
 	case <-signals:
-		log.Printf("shutting down")
+		slog.Info(fmt.Sprintf("shutting down"))
 	}
 
 	// Graceful shutdown: stop tickers, drain the HTTP server, then close the
@@ -330,7 +339,7 @@ func main() {
 func pollMRMerges(ctx context.Context, gl *gitlab.Client, st *store.Store, projectID string) {
 	incs, err := st.ListIncidentsWithMR(ctx, 100)
 	if err != nil {
-		log.Printf("mr poll: list: %v", err)
+		slog.Info(fmt.Sprintf("mr poll: list: %v", err))
 		return
 	}
 	const workers = 8
@@ -366,22 +375,22 @@ func pollOneMR(ctx context.Context, gl *gitlab.Client, st *store.Store, projectI
 	}
 	state, err := gl.GetMRState(ctx, projectID, iid)
 	if err != nil {
-		log.Printf("mr poll: state of #%d (mr %d): %v", inc.ID, iid, err)
+		slog.Info(fmt.Sprintf("mr poll: state of #%d (mr %d): %v", inc.ID, iid, err))
 		return
 	}
 	switch state {
 	case "merged":
 		if err := st.MarkResolved(ctx, inc.ID, "mr_merged"); err != nil {
-			log.Printf("mr poll: resolve #%d: %v", inc.ID, err)
+			slog.Info(fmt.Sprintf("mr poll: resolve #%d: %v", inc.ID, err))
 			return
 		}
 		_, _ = st.AddEvent(ctx, inc.ID, model.EventMRMerged, inc.MRURL)
-		log.Printf("mr poll: incident #%d resolved via merged MR %d", inc.ID, iid)
+		slog.Info(fmt.Sprintf("mr poll: incident #%d resolved via merged MR %d", inc.ID, iid))
 	case "closed":
 		has, _ := st.HasEvent(ctx, inc.ID, model.EventMRClosed)
 		if !has {
 			_, _ = st.AddEvent(ctx, inc.ID, model.EventMRClosed, inc.MRURL)
-			log.Printf("mr poll: incident #%d MR %d closed without merge", inc.ID, iid)
+			slog.Info(fmt.Sprintf("mr poll: incident #%d MR %d closed without merge", inc.ID, iid))
 		}
 	}
 }

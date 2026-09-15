@@ -112,20 +112,15 @@ func (s *Store) ListIncidents(ctx context.Context, status string, limit int) ([]
 	return s.ListIncidentsFiltered(ctx, status, "", "", limit)
 }
 
-// ListIncidentsFiltered lists incidents optionally filtered by status,
-// severity and a free-text query against host/title/message/source.
-func (s *Store) ListIncidentsFiltered(ctx context.Context, status, severity, query string, limit int) ([]*model.Incident, error) {
-	if limit <= 0 {
-		limit = 100
-	}
-	q := `SELECT ` + incidentCols + ` FROM incidents`
+// incidentListWhere builds the WHERE clause and args for incident listing.
+// Soft-deleted incidents are hidden unless a status is explicitly requested.
+func incidentListWhere(status, severity, query string) (string, []any) {
 	conds := []string{}
 	args := []any{}
 	if status != "" {
 		conds = append(conds, `status = ?`)
 		args = append(args, status)
 	} else {
-		// Soft-deleted incidents are hidden unless explicitly requested.
 		conds = append(conds, `status != ?`)
 		args = append(args, model.IncidentDeleted)
 	}
@@ -138,10 +133,20 @@ func (s *Store) ListIncidentsFiltered(ctx context.Context, status, severity, que
 		like := "%" + strings.ToLower(query) + "%"
 		args = append(args, like, like, like, like, query)
 	}
-	if len(conds) > 0 {
-		q += ` WHERE ` + strings.Join(conds, " AND ")
+	if len(conds) == 0 {
+		return "", args
 	}
-	q += ` ORDER BY id DESC LIMIT ?`
+	return ` WHERE ` + strings.Join(conds, " AND "), args
+}
+
+// ListIncidentsFiltered lists incidents optionally filtered by status,
+// severity and a free-text query against host/title/message/source.
+func (s *Store) ListIncidentsFiltered(ctx context.Context, status, severity, query string, limit int) ([]*model.Incident, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	where, args := incidentListWhere(status, severity, query)
+	q := `SELECT ` + incidentCols + ` FROM incidents` + where + ` ORDER BY id DESC LIMIT ?`
 	args = append(args, limit)
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
@@ -157,6 +162,67 @@ func (s *Store) ListIncidentsFiltered(ctx context.Context, status, severity, que
 		out = append(out, inc)
 	}
 	return out, rows.Err()
+}
+
+// ListIncidentsSorted lists incidents with configurable ordering (used by the
+// incidents page sort toggle).
+func (s *Store) ListIncidentsSorted(ctx context.Context, status, severity, query string, limit int, asc bool) ([]*model.Incident, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	where, args := incidentListWhere(status, severity, query)
+	order := "DESC"
+	if asc {
+		order = "ASC"
+	}
+	q := `SELECT ` + incidentCols + ` FROM incidents` + where + ` ORDER BY id ` + order + ` LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*model.Incident{}
+	for rows.Next() {
+		inc, err := scanIncident(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, inc)
+	}
+	return out, rows.Err()
+}
+
+// ListIncidentsPage returns one page of incidents plus the total count
+// matching the filters, for offset pagination.
+func (s *Store) ListIncidentsPage(ctx context.Context, status, severity, query string, limit, offset int) ([]*model.Incident, int64, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	where, args := incidentListWhere(status, severity, query)
+	var total int64
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM incidents`+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	q := `SELECT ` + incidentCols + ` FROM incidents` + where + ` ORDER BY id DESC LIMIT ? OFFSET ?`
+	pageArgs := append(append([]any{}, args...), limit, offset)
+	rows, err := s.db.QueryContext(ctx, q, pageArgs...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	out := []*model.Incident{}
+	for rows.Next() {
+		inc, err := scanIncident(rows)
+		if err != nil {
+			return nil, 0, err
+		}
+		out = append(out, inc)
+	}
+	return out, total, rows.Err()
 }
 
 func (s *Store) UpdateIncidentStatus(ctx context.Context, id int64, status model.IncidentStatus) error {

@@ -9,7 +9,7 @@
   <div class="stat"><div class="num">{{.Total}}</div><div class="label">Total incidents</div></div>
   <div class="stat"><div class="num">{{.Open}}</div><div class="label">Open</div></div>
   <div class="stat"><div class="num">{{.Critical}}</div><div class="label">Critical</div></div>
-  <div class="stat"><div class="num">{{.NeedsReview}}</div><div class="label">Diagnosed, no MR</div></div>
+  <div class="stat"><a class="plain" href="/incidents?status=diagnosed"><div class="num">{{.NeedsReview}}</div><div class="label">Diagnosed, no MR</div></a></div>
   {{if .Stats}}<div class="stat"><div class="num">{{.Stats.Resolved}}</div><div class="label">Resolved</div></div>
   <div class="stat"><div class="num">{{.Stats.Recurrences}}</div><div class="label">Recurrences</div></div>
   <div class="stat"><div class="num">{{.Stats.Error}}</div><div class="label">Diagnosis errors</div></div>

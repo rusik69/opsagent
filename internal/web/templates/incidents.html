@@ -22,6 +22,8 @@
     </select>
     <button class="btn" type="submit">Filter</button>
     <a class="btn small" href="/incidents">Reset</a>
+    {{if .Asc}}<a class="btn small" href="/incidents?status={{.Status}}&amp;severity={{.Severity}}&amp;q={{.Query}}&amp;sort=desc">Newest first</a>
+    {{else}}<a class="btn small" href="/incidents?status={{.Status}}&amp;severity={{.Severity}}&amp;q={{.Query}}&amp;sort=asc">Oldest first</a>{{end}}
   </form>
 </div>
 

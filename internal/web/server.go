@@ -11,8 +11,9 @@ import (
 	"fmt"
 	"html/template"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -104,6 +105,15 @@ func (s *Server) routes() {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
+	s.mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
+		if err := s.store.Ping(r.Context()); err != nil {
+			http.Error(w, "not ready", http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+	s.mux.HandleFunc("GET /metrics", s.handleMetrics)
 
 	// Pages.
 	s.mux.HandleFunc("GET /", s.handleDashboard)
@@ -162,7 +172,40 @@ func (s *Server) routes() {
 
 // Handler returns the root http.Handler with middleware applied.
 func (s *Server) Handler() http.Handler {
-	return s.apiKeyMiddleware(s.logMiddleware(s.mux))
+	return s.apiKeyMiddleware(s.logMiddleware(s.csrfMiddleware(s.mux)))
+}
+
+// csrfMiddleware rejects cross-origin state-changing requests from browsers
+// by requiring the Origin/Referer host to match the request host. Requests
+// without an Origin or Referer (curl, API clients, server-to-server) are
+// unaffected, so webhook/API usage does not need a token.
+func (s *Server) csrfMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		default:
+			next.ServeHTTP(w, r)
+			return
+		}
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			origin = r.Header.Get("Referer")
+		}
+		if origin == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		u, err := url.Parse(origin)
+		if err != nil || u.Host == "" {
+			http.Error(w, "bad origin", http.StatusBadRequest)
+			return
+		}
+		if !strings.EqualFold(u.Host, r.Host) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) logMiddleware(next http.Handler) http.Handler {
@@ -171,7 +214,7 @@ func (s *Server) logMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		log.Printf("%s %s", r.Method, r.URL.Path)
+		slog.Info("http request", "method", r.Method, "path", r.URL.Path)
 		next.ServeHTTP(w, r)
 	})
 }
@@ -190,7 +233,7 @@ func (s *Server) apiKeyMiddleware(next http.Handler) http.Handler {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/healthz" {
+		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -250,7 +293,7 @@ func (s *Server) ListenAndServe() error {
 		IdleTimeout:       120 * time.Second,
 	}
 	s.httpSrv = srv
-	log.Printf("opsagent listening on %s", s.cfg.Server.Listen)
+	slog.Info("opsagent listening", "addr", s.cfg.Server.Listen)
 	return srv.ListenAndServe()
 }
 
@@ -265,7 +308,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 func (s *Server) render(w http.ResponseWriter, name string, data any) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := s.tmpl.ExecuteTemplate(w, name, data); err != nil {
-		log.Printf("render %s: %v", name, err)
+		slog.Warn("template render failed", "template", name, "error", err)
 	}
 }
 
@@ -273,6 +316,36 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// writeAPIError writes a consistent JSON error envelope:
+// {"error":{"code":<machine-readable>, "message":<human-readable>}}.
+func writeAPIError(w http.ResponseWriter, status int, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"error": map[string]string{"code": errCode(status), "message": message},
+	})
+}
+
+// errCode maps an HTTP status to a machine-readable error code.
+func errCode(status int) string {
+	switch status {
+	case http.StatusBadRequest:
+		return "bad_request"
+	case http.StatusUnauthorized:
+		return "unauthorized"
+	case http.StatusNotFound:
+		return "not_found"
+	case http.StatusConflict:
+		return "conflict"
+	case http.StatusTooManyRequests:
+		return "too_many_requests"
+	case http.StatusInternalServerError:
+		return "internal"
+	default:
+		return "error"
+	}
 }
 
 func sliceSolution(s string) string {

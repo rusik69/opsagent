@@ -1124,3 +1124,104 @@ func TestWebhookHMAC(t *testing.T) {
 		t.Fatalf("expected 201 with signature, got %d", resp2.StatusCode)
 	}
 }
+
+func TestCSRFOriginCheck(t *testing.T) {
+	ts := newTestServer(t)
+	// Same-origin JSON POST must be accepted.
+	req, _ := http.NewRequest(http.MethodPost, ts.ts.URL+"/api/v1/incidents",
+		strings.NewReader(`{"host":"web-01","title":"cpu","severity":"warning"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", ts.ts.URL)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("same-origin POST: %d", resp.StatusCode)
+	}
+	// Cross-origin POST must be rejected.
+	req2, _ := http.NewRequest(http.MethodPost, ts.ts.URL+"/api/v1/incidents",
+		strings.NewReader(`host=web-01&title=cpu&severity=warning`))
+	req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req2.Header.Set("Origin", "http://evil.example.com")
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusForbidden {
+		t.Fatalf("cross-origin POST: %d", resp2.StatusCode)
+	}
+	// No Origin (curl/API) is unaffected.
+	resp3, err := http.Post(ts.ts.URL+"/api/v1/incidents", "application/json",
+		strings.NewReader(`{"host":"web-01","title":"cpu","severity":"warning"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp3.Body.Close()
+	if resp3.StatusCode != http.StatusCreated {
+		t.Fatalf("no-origin POST: %d", resp3.StatusCode)
+	}
+}
+
+func TestMetricsAndReadyz(t *testing.T) {
+	ts := newTestServer(t)
+	ts.createIncident(t, "web-01", "cpu")
+
+	// Readiness.
+	resp, err := http.Get(ts.ts.URL + "/readyz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("readyz: %d", resp.StatusCode)
+	}
+
+	// Metrics (no API key configured in the test server, so it is open).
+	resp2, err := http.Get(ts.ts.URL + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp2.Body)
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK || !strings.Contains(string(body), "opsagent_incidents{status=\"open\"} 1") {
+		t.Fatalf("metrics: %d %s", resp2.StatusCode, body)
+	}
+}
+
+func TestIncidentPagination(t *testing.T) {
+	ts := newTestServer(t)
+	for i := 0; i < 5; i++ {
+		ts.createIncident(t, "web-01", fmt.Sprintf("incident %d", i))
+	}
+	resp, err := http.Get(ts.ts.URL + "/api/v1/incidents?limit=2&offset=0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if got := resp.Header.Get("X-Total-Count"); got != "5" {
+		t.Fatalf("expected X-Total-Count 5, got %q", got)
+	}
+	var incs []struct {
+		ID int64 `json:"id"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&incs)
+	if len(incs) != 2 {
+		t.Fatalf("expected 2 incidents on page 1, got %d", len(incs))
+	}
+	// Second page must not overlap.
+	resp2, err := http.Get(ts.ts.URL + "/api/v1/incidents?limit=2&offset=2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+	var incs2 []struct {
+		ID int64 `json:"id"`
+	}
+	_ = json.NewDecoder(resp2.Body).Decode(&incs2)
+	if len(incs2) != 2 || incs2[0].ID == incs[0].ID {
+		t.Fatalf("expected disjoint page 2, got %+v", incs2)
+	}
+}

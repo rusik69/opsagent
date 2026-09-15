@@ -21,7 +21,7 @@ func (s *Server) handleAPICreateIncident(w http.ResponseWriter, r *http.Request)
 	if r.Header.Get("Content-Type") == "application/x-www-form-urlencoded" {
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		if err := r.ParseForm(); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			writeAPIError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		g.Host = r.Form.Get("host")
@@ -48,13 +48,13 @@ func (s *Server) handleAPICreateIncident(w http.ResponseWriter, r *http.Request)
 		}
 	} else {
 		if err := readJSON(r, &g); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+			writeAPIError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 			return
 		}
 	}
 	inc, err := s.incidents.CreateGeneric(r.Context(), g)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		writeAPIError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if r.Header.Get("Content-Type") == "application/x-www-form-urlencoded" {
@@ -70,12 +70,12 @@ func (s *Server) handleAPIAlertmanager(w http.ResponseWriter, r *http.Request) {
 	}
 	var payload incidents.AlertmanagerPayload
 	if err := readJSON(r, &payload); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+		writeAPIError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
 	created, err := s.incidents.CreateAlertmanager(r.Context(), payload)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"created": len(created), "incidents": created})
@@ -86,30 +86,32 @@ func (s *Server) handleAPIListIncidents(w http.ResponseWriter, r *http.Request) 
 	severity := r.URL.Query().Get("severity")
 	query := r.URL.Query().Get("q")
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 	if limit <= 0 {
 		limit = 100
 	}
-	incs, err := s.store.ListIncidentsFiltered(r.Context(), status, severity, query, limit)
+	incs, total, err := s.store.ListIncidentsPage(r.Context(), status, severity, query, limit, offset)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	w.Header().Set("X-Total-Count", fmt.Sprintf("%d", total))
 	writeJSON(w, http.StatusOK, incs)
 }
 
 func (s *Server) incidentFromPath(w http.ResponseWriter, r *http.Request) *model.Incident {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid incident id"})
+		writeAPIError(w, http.StatusBadRequest, "invalid incident id")
 		return nil
 	}
 	inc, err := s.store.GetIncident(r.Context(), id)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return nil
 	}
 	if inc == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "incident not found"})
+		writeAPIError(w, http.StatusNotFound, "incident not found")
 		return nil
 	}
 	return inc
@@ -131,7 +133,7 @@ func (s *Server) handleAPIDiagnose(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.cfg.LLM.Enabled {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "LLM agent is disabled in config"})
+		writeAPIError(w, http.StatusBadRequest, "LLM agent is disabled in config")
 		return
 	}
 	// Global concurrency limit: avoid starting an unbounded number of LLM
@@ -139,14 +141,14 @@ func (s *Server) handleAPIDiagnose(w http.ResponseWriter, r *http.Request) {
 	select {
 	case s.diagSem <- struct{}{}:
 	default:
-		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many concurrent diagnoses"})
+		writeAPIError(w, http.StatusTooManyRequests, "too many concurrent diagnoses")
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	if !s.pool.Start(inc.ID, cancel) {
 		cancel()
 		<-s.diagSem
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "diagnosis already running for this incident"})
+		writeAPIError(w, http.StatusConflict, "diagnosis already running for this incident")
 		return
 	}
 	go func() {
@@ -173,36 +175,36 @@ func (s *Server) handleAPIUpdateStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Header.Get("Content-Type") == "application/x-www-form-urlencoded" {
 		if err := r.ParseForm(); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			writeAPIError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		req.Status = model.IncidentStatus(r.Form.Get("status"))
 	} else if err := readJSON(r, &req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+		writeAPIError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
 	switch req.Status {
 	case model.IncidentOpen, model.IncidentDiagnosed, model.IncidentResolved, model.IncidentCancelled, model.IncidentError:
 	default:
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("invalid status %q", req.Status)})
+		writeAPIError(w, http.StatusBadRequest, fmt.Sprintf("invalid status %q", req.Status))
 		return
 	}
 	switch req.Status {
 	case model.IncidentResolved:
 		if err := s.store.MarkResolved(r.Context(), inc.ID, "manual"); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			writeAPIError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		_, _ = s.store.AddEvent(r.Context(), inc.ID, model.EventResolved, "resolved manually by operator")
 	case model.IncidentCancelled:
 		if err := s.store.UpdateIncidentStatus(r.Context(), inc.ID, req.Status); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			writeAPIError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		_, _ = s.store.AddEvent(r.Context(), inc.ID, model.EventCancelled, "cancelled by operator")
 	default:
 		if err := s.store.UpdateIncidentStatus(r.Context(), inc.ID, req.Status); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			writeAPIError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 	}
@@ -223,7 +225,7 @@ func (s *Server) handleAPICancelDiagnosis(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if !s.pool.Cancel(inc.ID) {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no diagnosis running for this incident"})
+		writeAPIError(w, http.StatusNotFound, "no diagnosis running for this incident")
 		return
 	}
 	_, _ = s.store.AddEvent(r.Context(), inc.ID, model.EventCancelled, "diagnosis cancelled by operator")
@@ -241,11 +243,11 @@ func (s *Server) handleAPIGetDiagnosis(w http.ResponseWriter, r *http.Request) {
 	}
 	d, err := s.store.GetDiagnosis(r.Context(), inc.ID)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if d == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no diagnosis yet"})
+		writeAPIError(w, http.StatusNotFound, "no diagnosis yet")
 		return
 	}
 	runs, _ := s.store.ListCommandRuns(r.Context(), inc.ID)
@@ -271,7 +273,7 @@ func (s *Server) handleAPIHosts(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAPIHostCommands(w http.ResponseWriter, r *http.Request) {
 	host := r.PathValue("host")
 	if _, ok := s.resolver.Resolve(host); !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "host not configured"})
+		writeAPIError(w, http.StatusNotFound, "host not configured")
 		return
 	}
 	writeJSON(w, http.StatusOK, s.executor.Allowlist().List())
@@ -280,7 +282,7 @@ func (s *Server) handleAPIHostCommands(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAPIHostRunCommand(w http.ResponseWriter, r *http.Request) {
 	host := r.PathValue("host")
 	if _, ok := s.resolver.Resolve(host); !ok {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "host not configured"})
+		writeAPIError(w, http.StatusBadRequest, "host not configured")
 		return
 	}
 	var req struct {
@@ -288,7 +290,7 @@ func (s *Server) handleAPIHostRunCommand(w http.ResponseWriter, r *http.Request)
 		Params    map[string]string `json:"params"`
 	}
 	if err := readJSON(r, &req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+		writeAPIError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
 	run, err := s.executor.Run(r.Context(), nil, host, req.CommandID, req.Params)
@@ -318,7 +320,7 @@ func (s *Server) handleAPIRepos(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAPIReposSync(w http.ResponseWriter, r *http.Request) {
 	out, err := s.repos.Sync(r.Context())
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"result": out})
@@ -327,7 +329,7 @@ func (s *Server) handleAPIReposSync(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAPIReposSearch(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query().Get("q")
 	if q == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "q is required"})
+		writeAPIError(w, http.StatusBadRequest, "q is required")
 		return
 	}
 	max, _ := strconv.Atoi(r.URL.Query().Get("max"))
@@ -341,11 +343,14 @@ func (s *Server) handleAPIReposSearch(w http.ResponseWriter, r *http.Request) {
 // Memory & instructions ---------------------------------------------------
 
 func (s *Server) handleAPIMemories(w http.ResponseWriter, r *http.Request) {
-	items, err := s.store.ListMemories(r.Context(), 200)
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	items, total, err := s.store.ListMemoriesPage(r.Context(), limit, offset)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	w.Header().Set("X-Total-Count", fmt.Sprintf("%d", total))
 	writeJSON(w, http.StatusOK, items)
 }
 
@@ -361,16 +366,16 @@ func (s *Server) handleAPICreateMemory(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	} else if err := readJSON(r, &m); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+		writeAPIError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
 	if m.Topic == "" || m.Content == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "topic and content are required"})
+		writeAPIError(w, http.StatusBadRequest, "topic and content are required")
 		return
 	}
 	created, err := s.store.CreateMemory(r.Context(), &m)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if r.Header.Get("Content-Type") == "application/x-www-form-urlencoded" {
@@ -381,11 +386,14 @@ func (s *Server) handleAPICreateMemory(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAPIInstructions(w http.ResponseWriter, r *http.Request) {
-	items, err := s.store.ListInstructions(r.Context(), 200)
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	items, total, err := s.store.ListInstructionsPage(r.Context(), limit, offset)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	w.Header().Set("X-Total-Count", fmt.Sprintf("%d", total))
 	writeJSON(w, http.StatusOK, items)
 }
 
@@ -397,16 +405,16 @@ func (s *Server) handleAPICreateInstruction(w http.ResponseWriter, r *http.Reque
 		i.Source = r.Form.Get("source")
 		i.Priority, _ = strconv.Atoi(r.Form.Get("priority"))
 	} else if err := readJSON(r, &i); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+		writeAPIError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
 	if i.Content == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "content is required"})
+		writeAPIError(w, http.StatusBadRequest, "content is required")
 		return
 	}
 	created, err := s.store.CreateInstruction(r.Context(), &i)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if r.Header.Get("Content-Type") == "application/x-www-form-urlencoded" {
@@ -421,11 +429,11 @@ func (s *Server) handleAPICreateInstruction(w http.ResponseWriter, r *http.Reque
 func (s *Server) handleAPIApplyInstruction(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil || id <= 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid instruction id"})
+		writeAPIError(w, http.StatusBadRequest, "invalid instruction id")
 		return
 	}
 	if err := s.store.MarkInstructionApplied(r.Context(), id); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if isHTMX(r) {
@@ -449,10 +457,44 @@ func splitComma(s string) []string {
 func (s *Server) handleAPIStats(w http.ResponseWriter, r *http.Request) {
 	st, err := s.store.IncidentStats(r.Context())
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, st)
+}
+
+// handleMetrics exposes a small dependency-free Prometheus text-format
+// endpoint backed by the store aggregates.
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	stats, err := s.store.IncidentStats(r.Context())
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	var sb strings.Builder
+	sb.WriteString("# HELP opsagent_incidents Incidents by status.\n")
+	sb.WriteString("# TYPE opsagent_incidents gauge\n")
+	for _, sc := range []struct {
+		label string
+		n     int64
+	}{
+		{"open", stats.Open}, {"diagnosing", stats.Diagnosing}, {"diagnosed", stats.Diagnosed},
+		{"resolved", stats.Resolved}, {"cancelled", stats.Cancelled}, {"error", stats.Error},
+		{"deleted", stats.Deleted},
+	} {
+		fmt.Fprintf(&sb, "opsagent_incidents{status=%q} %d\n", sc.label, sc.n)
+	}
+	sb.WriteString("# HELP opsagent_incidents_critical Critical incidents.\n")
+	sb.WriteString("# TYPE opsagent_incidents_critical gauge\n")
+	fmt.Fprintf(&sb, "opsagent_incidents_critical %d\n", stats.Critical)
+	sb.WriteString("# HELP opsagent_incident_recurrences Total recurrence events.\n")
+	sb.WriteString("# TYPE opsagent_incident_recurrences counter\n")
+	fmt.Fprintf(&sb, "opsagent_incident_recurrences %d\n", stats.Recurrences)
+	sb.WriteString("# HELP opsagent_command_avg_duration_ms Average successful command duration.\n")
+	sb.WriteString("# TYPE opsagent_command_avg_duration_ms gauge\n")
+	fmt.Fprintf(&sb, "opsagent_command_avg_duration_ms %d\n", stats.AvgDiagnosisMS)
+	_, _ = w.Write([]byte(sb.String()))
 }
 
 // Groups & correlation ------------------------------------------------------
@@ -460,7 +502,7 @@ func (s *Server) handleAPIStats(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAPIGroups(w http.ResponseWriter, r *http.Request) {
 	groups, err := s.store.ListGroups(r.Context(), 200)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	out := []map[string]any{}
@@ -477,12 +519,12 @@ func (s *Server) handleAPIGroups(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAPIGroupDetail(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid group id"})
+		writeAPIError(w, http.StatusBadRequest, "invalid group id")
 		return
 	}
 	groups, err := s.store.ListGroups(r.Context(), 1000)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	var g *model.IncidentGroup
@@ -493,7 +535,7 @@ func (s *Server) handleAPIGroupDetail(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if g == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "group not found"})
+		writeAPIError(w, http.StatusNotFound, "group not found")
 		return
 	}
 	members, _ := s.store.GroupMemberIDs(r.Context(), id)
@@ -508,11 +550,11 @@ func (s *Server) handleAPIGroupDetail(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAPIRunCorrelation(w http.ResponseWriter, r *http.Request) {
 	if s.correlate == nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "correlation is not configured"})
+		writeAPIError(w, http.StatusBadRequest, "correlation is not configured")
 		return
 	}
 	if err := s.correlate.Run(r.Context()); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "correlated"})
@@ -541,7 +583,7 @@ func (s *Server) handleAPIDeleteIncident(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if err := s.store.DeleteIncident(r.Context(), inc.ID); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	_, _ = s.store.AddEvent(r.Context(), inc.ID, model.EventCancelled, "incident deleted by operator")
@@ -556,11 +598,11 @@ type bulkRequest struct {
 func decodeBulk(w http.ResponseWriter, r *http.Request) (*bulkRequest, bool) {
 	var req bulkRequest
 	if err := readJSON(r, &req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+		writeAPIError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return nil, false
 	}
 	if len(req.IDs) == 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ids is required"})
+		writeAPIError(w, http.StatusBadRequest, "ids is required")
 		return nil, false
 	}
 	return &req, true
@@ -575,7 +617,7 @@ func (s *Server) handleAPIBulkStatus(w http.ResponseWriter, r *http.Request) {
 	switch req.Status {
 	case model.IncidentOpen, model.IncidentDiagnosed, model.IncidentResolved, model.IncidentCancelled, model.IncidentError:
 	default:
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("invalid status %q", req.Status)})
+		writeAPIError(w, http.StatusBadRequest, fmt.Sprintf("invalid status %q", req.Status))
 		return
 	}
 	if req.Status == model.IncidentResolved {
@@ -588,7 +630,7 @@ func (s *Server) handleAPIBulkStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	n, err := s.store.BulkUpdateStatus(r.Context(), req.IDs, req.Status)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"updated": n, "status": req.Status})
@@ -602,7 +644,7 @@ func (s *Server) handleAPIBulkDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	n, err := s.store.BulkUpdateStatus(r.Context(), req.IDs, model.IncidentDeleted)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": n})
@@ -621,16 +663,16 @@ func (s *Server) handleAPIAddNote(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		req.Note = r.Form.Get("note")
 	} else if err := readJSON(r, &req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+		writeAPIError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
 	req.Note = strings.TrimSpace(req.Note)
 	if req.Note == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "note is required"})
+		writeAPIError(w, http.StatusBadRequest, "note is required")
 		return
 	}
 	if _, err := s.store.AddEvent(r.Context(), inc.ID, model.EventNote, req.Note); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if isHTMX(r) {
@@ -647,7 +689,7 @@ func (s *Server) handleAPIIncidentEvents(w http.ResponseWriter, r *http.Request)
 	}
 	events, err := s.store.ListEvents(r.Context(), inc.ID)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, events)
@@ -658,7 +700,7 @@ func (s *Server) handleAPIIncidentEvents(w http.ResponseWriter, r *http.Request)
 func (s *Server) handleAPIRetrospectives(w http.ResponseWriter, r *http.Request) {
 	items, err := s.store.ListRetrospectives(r.Context(), 50)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, items)
@@ -666,12 +708,12 @@ func (s *Server) handleAPIRetrospectives(w http.ResponseWriter, r *http.Request)
 
 func (s *Server) handleAPIRunReview(w http.ResponseWriter, r *http.Request) {
 	if s.reviewer == nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "reviewer is not configured"})
+		writeAPIError(w, http.StatusBadRequest, "reviewer is not configured")
 		return
 	}
 	retro, err := s.reviewer.Run(r.Context())
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if retro == nil {

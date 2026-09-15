@@ -44,6 +44,28 @@ func (s *Store) ListMemories(ctx context.Context, limit int) ([]*model.Memory, e
 	return scanMemories(rows)
 }
 
+// ListMemoriesPage returns one page of memories plus the total count.
+func (s *Store) ListMemoriesPage(ctx context.Context, limit, offset int) ([]*model.Memory, int64, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	var total int64
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM memories`).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, topic, content, tags_json, created_at FROM memories ORDER BY id DESC LIMIT ? OFFSET ?`, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	items, err := scanMemories(rows)
+	return items, total, err
+}
+
 func (s *Store) SearchMemories(ctx context.Context, query string, limit int) ([]*model.Memory, error) {
 	if limit <= 0 {
 		limit = 20
@@ -151,6 +173,41 @@ func (s *Store) CreateInstruction(ctx context.Context, i *model.Instruction) (*m
 	}
 	i.ID, _ = res.LastInsertId()
 	return i, nil
+}
+
+// ListInstructionsPage returns one page of instructions plus the total count.
+func (s *Store) ListInstructionsPage(ctx context.Context, limit, offset int) ([]*model.Instruction, int64, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	var total int64
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM instructions`).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, content, priority, source, applied, created_at FROM instructions ORDER BY priority ASC, id DESC LIMIT ? OFFSET ?`, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	out := []*model.Instruction{}
+	for rows.Next() {
+		var (
+			i         model.Instruction
+			applied   int
+			createdAt string
+		)
+		if err := rows.Scan(&i.ID, &i.Content, &i.Priority, &i.Source, &applied, &createdAt); err != nil {
+			return nil, 0, fmt.Errorf("scan instruction: %w", err)
+		}
+		i.Applied = applied == 1
+		i.CreatedAt = timeParse(createdAt)
+		out = append(out, &i)
+	}
+	return out, total, rows.Err()
 }
 
 func (s *Store) ListInstructions(ctx context.Context, limit int) ([]*model.Instruction, error) {

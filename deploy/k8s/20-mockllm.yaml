@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mockllm
+  namespace: opsagent
+  labels:
+    app: mockllm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mockllm
+  template:
+    metadata:
+      labels:
+        app: mockllm
+    spec:
+      containers:
+        - name: mockllm
+          image: opsagent:dev
+          command: ["/app/mockllm"]
+          ports:
+            - {name: http, containerPort: 8081}
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mockllm
+  namespace: opsagent
+spec:
+  selector:
+    app: mockllm
+  ports:
+    - {name: http, port: 8081, targetPort: 8081}

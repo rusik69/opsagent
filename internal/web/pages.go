@@ -57,12 +57,15 @@ func (s *Server) handleIncidentsPage(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("status")
 	severity := r.URL.Query().Get("severity")
 	query := r.URL.Query().Get("q")
-	incs, err := s.store.ListIncidentsFiltered(r.Context(), status, severity, query, 200)
+	asc := r.URL.Query().Get("sort") == "asc"
+	incs, err := s.store.ListIncidentsSorted(r.Context(), status, severity, query, 200, asc)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	s.render(w, "incidents", map[string]any{"Incidents": incs, "Status": status, "Severity": severity, "Query": query})
+	s.render(w, "incidents", map[string]any{
+		"Incidents": incs, "Status": status, "Severity": severity, "Query": query, "Asc": asc,
+	})
 }
 
 func (s *Server) handleIncidentPage(w http.ResponseWriter, r *http.Request) {

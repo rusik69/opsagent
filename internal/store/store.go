@@ -4,7 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -204,7 +204,7 @@ func now() string { return time.Now().UTC().Format(timeFmt) }
 func timeParse(s string) time.Time {
 	t, err := time.Parse(timeFmt, s)
 	if err != nil && s != "" {
-		log.Printf("store: malformed timestamp %q: %v", s, err)
+		slog.Warn("malformed timestamp", "value", s, "error", err)
 	}
 	return t
 }

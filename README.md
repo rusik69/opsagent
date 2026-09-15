@@ -100,6 +100,8 @@ host are allowlisted templates, and no command may modify the host.
 | POST | `/api/v1/instructions/{id}/apply` | Mark an instruction as applied |
 | GET/POST | `/mcp` | MCP server (streamable HTTP) |
 | GET | `/healthz` | Liveness |
+| GET | `/readyz` | Readiness (DB ping) |
+| GET | `/metrics` | Prometheus text metrics |
 
 ## Configuration
 
@@ -137,6 +139,28 @@ curl -X POST localhost:8080/api/v1/incidents/1/diagnose
 Open http://localhost:8080 for the dashboard. The incidents list shows the
 investigation status of each alert, a Details button, and the MR link /
 solution summary once one exists.
+
+## Kubernetes demo
+
+A self-contained demo shows the full pipeline with a single make target. It
+needs `kind` and `kubectl`, builds the image, creates a cluster, and deploys:
+
+- **opsagent** with test config repos (Ansible/Puppet/docs) from a ConfigMap
+- a **test host** (sshd) the agent actually runs read-only commands on
+- a **scripted mock LLM** that drives a realistic diagnosis (uptime → host
+  config → docs search → report)
+- a **seed script** that ingests test incidents and triggers a diagnosis
+
+```sh
+make k8s-demo     # build, deploy, port-forward, seed, diagnose
+make k8s-down     # tear down the cluster
+```
+
+Then open http://localhost:8080 (dashboard) or use the API:
+`POST /api/v1/incidents/{id}/diagnose`, `GET /api/v1/incidents/{id}/diagnosis`.
+
+> The committed `deploy/demo/keys` keypair and `deploy/k8s/02-secret.yaml`
+> are throwaway demo credentials, never for production.
 
 ## Security notes
 

@@ -1,0 +1,105 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: opsagent-config
+  namespace: opsagent
+data:
+  config.yaml: |
+    server:
+      listen: ":8080"
+    storage:
+      path: "/data/opsagent.db"
+      retention_days: 0
+    ssh:
+      timeout_seconds: 10
+      use_agent: false
+      private_key: "/etc/ssh-keys/demo_key"
+      known_hosts: "insecure"
+      hosts:
+        - name: web-01
+          address: test-host
+          user: ops
+          port: 22
+    repos:
+      - {name: ansible, type: ansible, path: /repos/ansible}
+      - {name: puppet, type: puppet, path: /repos/puppet}
+      - {name: docs, type: docs, path: /repos/docs}
+    llm:
+      enabled: true
+      base_url: "http://mockllm:8081/v1"
+      api_key: ""
+      model: "demo"
+      max_steps: 8
+      timeout_secs: 60
+    agent:
+      instructions_file: "/app/agent-rules.md"
+      max_concurrent: 2
+    correlate:
+      enabled: true
+      window_minutes: 60
+      interval_minutes: 5
+    review:
+      enabled: false
+    mcp:
+      expose_http: true
+---
+# Demo config repos (ansible/puppet/docs) mounted under /repos.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: demo-repos
+  namespace: opsagent
+data:
+  "ansible/hosts.ini": |
+    [webservers]
+    web-01 ansible_host=10.0.0.10
+
+    [databases]
+    db-01 ansible_host=10.0.0.20
+  "ansible/host_vars/web-01.yml": |
+    ---
+    nginx_port: 8080
+    worker_processes: 4
+    mem_limit: 4g
+    role: web
+  "ansible/roles/nginx/tasks/main.yml": |
+    ---
+    - name: ensure nginx is installed
+      ansible.builtin.package:
+        name: nginx
+        state: present
+    - name: deploy nginx config
+      ansible.builtin.template:
+        src: nginx.conf.j2
+        dest: /etc/nginx/nginx.conf
+      notify: reload nginx
+  "puppet/nodes/web-01.pp": |
+    node 'web-01' {
+      include ::nginx
+      class { 'nginx::server':
+        port => 8080,
+      }
+      package { 'curl':
+        ensure => installed,
+      }
+    }
+  "puppet/hieradata/web-01.yaml": |
+    ---
+    nginx::server::port: 8080
+    nginx::server::worker_processes: 4
+    nginx::server::client_max_body_size: 32m
+  "docs/nginx-troubleshooting.md": |
+    # Nginx troubleshooting
+
+    When nginx returns 502/504 or high load is reported:
+
+    1. Check /var/log/nginx/error.log first.
+    2. Verify the upstream backend is reachable: `ss -tulpn` on the host.
+    3. Compare the running config with the ansible template in
+       `roles/nginx/templates/nginx.conf.j2`.
+    4. A worker_processes mismatch with the CPU count often causes slowness.
+  "docs/postgres-tuning.md": |
+    # Postgres tuning
+
+    Connection pool exhaustion is the most common cause of latency spikes.
+    Check `max_connections` against pool size before scaling hardware.
