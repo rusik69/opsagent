@@ -3,31 +3,46 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
-	Server    ServerConfig    `yaml:"server"`
-	Storage   StorageConfig   `yaml:"storage"`
-	SSH       SSHConfig       `yaml:"ssh"`
-	Allowlist AllowlistConfig `yaml:"allowlist"`
-	Repos     []RepoConfig    `yaml:"repos"`
-	LLM       LLMConfig       `yaml:"llm"`
-	GitLab    GitLabConfig    `yaml:"gitlab"`
-	Agent     AgentConfig     `yaml:"agent"`
-	Correlate CorrelateConfig `yaml:"correlate"`
-	Review    ReviewConfig    `yaml:"review"`
-	MCP       MCPConfig       `yaml:"mcp"`
+	Server      ServerConfig      `yaml:"server"`
+	Storage     StorageConfig     `yaml:"storage"`
+	SSH         SSHConfig         `yaml:"ssh"`
+	Allowlist   AllowlistConfig   `yaml:"allowlist"`
+	Repos       []RepoConfig      `yaml:"repos"`
+	LLM         LLMConfig         `yaml:"llm"`
+	GitLab      GitLabConfig      `yaml:"gitlab"`
+	Agent       AgentConfig       `yaml:"agent"`
+	Correlate   CorrelateConfig   `yaml:"correlate"`
+	Review      ReviewConfig      `yaml:"review"`
+	MCP         MCPConfig         `yaml:"mcp"`
+	Maintenance MaintenanceConfig `yaml:"maintenance"`
 }
 
 type ServerConfig struct {
 	Listen string `yaml:"listen"`
-	APIKey string `yaml:"api_key"`
+	// APIKey gates every endpoint. APIKeyReadOnly additionally allows GET
+	// requests (read-only), and APIKeyWebhook additionally allows incident
+	// intake webhooks (POST /api/v1/incidents and /alertmanager).
+	APIKey         string `yaml:"api_key"`
+	APIKeyReadOnly string `yaml:"api_key_readonly"`
+	APIKeyWebhook  string `yaml:"api_key_webhook"`
 }
 
 type StorageConfig struct {
 	Path string `yaml:"path"`
+	// RetentionDays prunes old command runs and events (0 disables pruning).
+	RetentionDays int `yaml:"retention_days"`
+}
+
+type MaintenanceConfig struct {
+	// RepoSyncMinutes periodically pulls the configured git repos
+	// (0 disables the periodic sync; the initial boot sync still runs).
+	RepoSyncMinutes int `yaml:"repos_sync_minutes"`
 }
 
 type SSHConfig struct {
@@ -71,7 +86,11 @@ type LLMConfig struct {
 	Model       string `yaml:"model"`
 	MaxSteps    int    `yaml:"max_steps"`
 	TimeoutSecs int    `yaml:"timeout_secs"`
-	Enabled     bool   `yaml:"enabled"`
+	// MaxRetries is the number of retries on transient LLM errors (429/5xx).
+	MaxRetries int `yaml:"max_retries"`
+	// MaxTokens optionally caps the completion length (0 = provider default).
+	MaxTokens int  `yaml:"max_tokens"`
+	Enabled   bool `yaml:"enabled"`
 }
 
 type GitLabConfig struct {
@@ -119,7 +138,7 @@ type MCPConfig struct {
 func Default() *Config {
 	return &Config{
 		Server:  ServerConfig{Listen: ":8080"},
-		Storage: StorageConfig{Path: "./data/opsagent.db"},
+		Storage: StorageConfig{Path: "./data/opsagent.db", RetentionDays: 90},
 		SSH: SSHConfig{
 			TimeoutSeconds: 15,
 			UseAgent:       true,
@@ -130,6 +149,7 @@ func Default() *Config {
 			Model:       "llama3.1",
 			MaxSteps:    12,
 			TimeoutSecs: 180,
+			MaxRetries:  3,
 			Enabled:     true,
 		},
 		Agent: AgentConfig{InstructionsFile: "agent-rules.md", MaxConcurrent: 4},
@@ -137,8 +157,9 @@ func Default() *Config {
 			Enabled: true, WindowMinutes: 120, IntervalMinutes: 15,
 			Methods: []string{"host", "alertname", "label", "rootcause"},
 		},
-		Review: ReviewConfig{Enabled: true, IntervalHours: 6, Limit: 50, MinIncidents: 3, MaxSummaryLen: 4000},
-		MCP:    MCPConfig{ExposeHTTP: true},
+		Review:      ReviewConfig{Enabled: true, IntervalHours: 6, Limit: 50, MinIncidents: 3, MaxSummaryLen: 4000},
+		MCP:         MCPConfig{ExposeHTTP: true},
+		Maintenance: MaintenanceConfig{RepoSyncMinutes: 60},
 	}
 }
 
@@ -154,5 +175,34 @@ func Load(path string) (*Config, error) {
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse config %s: %w", path, err)
 	}
+	cfg.expandSecrets()
 	return cfg, nil
+}
+
+// expandSecrets resolves environment-variable references and file-backed
+// secrets in sensitive fields. A value of the form  is replaced with the
+// environment variable VAR, and a value prefixed with "file:" is read from the
+// referenced file (trailing whitespace trimmed). This keeps tokens out of the
+// config file itself.
+func (c *Config) expandSecrets() {
+	c.Server.APIKey = resolveSecret(c.Server.APIKey)
+	c.Server.APIKeyReadOnly = resolveSecret(c.Server.APIKeyReadOnly)
+	c.Server.APIKeyWebhook = resolveSecret(c.Server.APIKeyWebhook)
+	c.LLM.APIKey = resolveSecret(c.LLM.APIKey)
+	c.GitLab.Token = resolveSecret(c.GitLab.Token)
+	c.SSH.PrivateKey = resolveSecret(c.SSH.PrivateKey)
+}
+
+func resolveSecret(s string) string {
+	if s == "" {
+		return s
+	}
+	if path, ok := strings.CutPrefix(s, "file:"); ok {
+		data, err := os.ReadFile(strings.TrimSpace(path))
+		if err != nil {
+			return s
+		}
+		return strings.TrimSpace(string(data))
+	}
+	return os.ExpandEnv(s)
 }

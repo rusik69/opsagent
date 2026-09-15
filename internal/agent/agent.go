@@ -68,43 +68,71 @@ func (a *Agent) Diagnose(ctx context.Context, incident *model.Incident) (*model.
 	messages = append(messages, a.systemPrompt(incident))
 	messages = append(messages, Message{Role: "user", Content: a.incidentPrompt(incident)})
 
+	var total Usage
+
 	llmTools, err := a.toolsForLLM()
 	if err != nil {
-		a.finish(ctx, d, "error", fmt.Sprintf("failed to load tools: %v", err), messages)
+		a.finish(ctx, d, "error", fmt.Sprintf("failed to load tools: %v", err), total)
 		return d, err
 	}
 
 	step := 0
+	toolCalls := 0
+	seen := map[string]bool{}
 	for {
 		step++
 		if step > a.maxSteps {
 			// Force a final textual answer: without tools the LLM cannot call
 			// anything and must produce the report.
-			msg, err := a.client.Completion(ctx, messages, nil)
+			msg, usage, err := a.client.CompletionWithUsage(ctx, messages, nil)
+			total.add(usage)
 			if err != nil {
-				a.finish(ctx, d, "error", fmt.Sprintf("llm error: %v", err), messages)
+				a.finish(ctx, d, "error", fmt.Sprintf("llm error: %v", err), total)
 				return d, err
 			}
 			messages = append(messages, msg)
-			a.finish(ctx, d, "done", msg.Content, messages)
+			a.finish(ctx, d, "done", msg.Content, total)
 			return d, nil
 		}
-		msg, err := a.client.Completion(ctx, messages, llmTools)
+		msg, usage, err := a.client.CompletionWithUsage(ctx, messages, llmTools)
+		total.add(usage)
 		if err != nil {
-			a.finish(ctx, d, "error", fmt.Sprintf("llm error: %v", err), messages)
+			a.finish(ctx, d, "error", fmt.Sprintf("llm error: %v", err), total)
 			return d, err
 		}
 		messages = append(messages, msg)
 
 		if len(msg.ToolCalls) == 0 {
 			// Final answer: the diagnosis report.
-			a.finish(ctx, d, "done", msg.Content, messages)
+			a.finish(ctx, d, "done", msg.Content, total)
 			a.maybeReflect(ctx, incident, d, messages, llmTools)
 			return d, nil
 		}
 
 		runCtx := mcp.WithIncident(ctx, incident.ID)
 		for _, tc := range msg.ToolCalls {
+			sig := tc.Func.Name + "\x00" + string(tc.Func.Args)
+			if seen[sig] {
+				// The model repeated an identical call; re-running it would
+				// waste steps and tokens, so nudge it forward instead.
+				messages = append(messages, Message{
+					Role:       "tool",
+					ToolCallID: tc.ID,
+					Content:    "duplicate of an earlier identical call; not re-run. Use the previous result.",
+				})
+				continue
+			}
+			seen[sig] = true
+			if toolCalls >= maxToolCalls {
+				messages = append(messages, Message{
+					Role:       "tool",
+					ToolCallID: tc.ID,
+					Content:    "tool call budget exhausted; stop calling tools and produce the final report now.",
+				})
+				continue
+			}
+			toolCalls++
+
 			args := ParseToolArgs(tc.Func.Args)
 			res, err := a.mcp.Call(runCtx, tc.Func.Name, args)
 			output := ""
@@ -137,13 +165,14 @@ func (a *Agent) appendStep(d *model.Diagnosis, step int, tool, input, output str
 	})
 }
 
-func (a *Agent) finish(ctx context.Context, d *model.Diagnosis, status, report string, messages []Message) {
+func (a *Agent) finish(ctx context.Context, d *model.Diagnosis, status, report string, usage Usage) {
 	if report == "" {
 		report = "No final report produced."
 	}
 	d.Status = status
 	d.Report = report
 	d.Summary = summarize(report, 500)
+	d.Logs = formatUsage(usage)
 	_ = a.store.UpdateDiagnosis(ctx, d)
 	switch status {
 	case "done":
@@ -214,6 +243,26 @@ const maxToolOutput = 8000
 
 // maxToolInput caps the tool-call arguments persisted with a diagnosis step.
 const maxToolInput = 4000
+
+// maxToolCalls bounds the total number of tool executions in one diagnosis,
+// independent of the step count, to contain runaway loops.
+const maxToolCalls = 40
+
+// add accumulates usage counters.
+func (u *Usage) add(o Usage) {
+	u.PromptTokens += o.PromptTokens
+	u.CompletionTokens += o.CompletionTokens
+	u.TotalTokens += o.TotalTokens
+}
+
+// formatUsage renders accumulated usage for persistence, or "" when the
+// provider did not report any.
+func formatUsage(u Usage) string {
+	if u.PromptTokens == 0 && u.CompletionTokens == 0 && u.TotalTokens == 0 {
+		return ""
+	}
+	return fmt.Sprintf("tokens: prompt=%d completion=%d total=%d", u.PromptTokens, u.CompletionTokens, u.TotalTokens)
+}
 
 // truncateOutput truncates s to at most max runes, appending a marker when it
 // does so. It is rune-aware so multi-byte output is never split.

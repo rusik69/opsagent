@@ -222,8 +222,10 @@ func TestDiagnoseMaxStepsTerminates(t *testing.T) {
 		if d.Status != "done" {
 			t.Fatalf("expected done status after max steps, got %q", d.Status)
 		}
-		if len(d.Steps) != 3 {
-			t.Fatalf("expected 3 recorded steps, got %d", len(d.Steps))
+		// The fake LLM repeats the same tool call every step; identical
+		// calls are deduped, so only the first is recorded.
+		if len(d.Steps) != 1 {
+			t.Fatalf("expected 1 recorded step (identical calls deduped), got %d", len(d.Steps))
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("diagnosis did not terminate at max steps")
@@ -336,5 +338,30 @@ func TestTruncateOutput(t *testing.T) {
 	emoji := "🎉🎉🎉🎉🎉"
 	if got := truncateOutput(emoji, 3); len([]rune(got)) > 3+len("…[truncated]") {
 		t.Fatalf("rune split: %q", got)
+	}
+}
+
+func TestDiagnoseDedupesIdenticalToolCalls(t *testing.T) {
+	st, err := store.Open(t.TempDir() + "/dedup.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	al, _ := sshx.NewAllowlist(sshx.DefaultAllowlist())
+	exec := sshx.NewExecutor(al, &sshx.FakeRunner{}, st)
+	resolver := sshx.HostsFromTargets([]sshx.HostTarget{{Name: "web-01", Address: "10.0.0.1", User: "ops", Port: 22}})
+	rm, _ := repos.NewManager(nil, t.TempDir())
+	mcpSrv, _ := mcp.NewServer("test", "0.0.0", mcp.Deps{Executor: exec, Repos: rm, Store: st, Resolver: resolver})
+
+	llm := NewClient(alwaysToolCallLLM(t).URL+"/v1", "", "m")
+	ag := New(llm, mcpSrv, st, Options{MaxSteps: 5, Timeout: 0})
+	inc, _ := st.CreateIncident(context.Background(), &model.Incident{Host: "web-01", Title: "t", Status: model.IncidentOpen})
+	d, err := ag.Diagnose(context.Background(), inc)
+	if err != nil {
+		t.Fatalf("Diagnose: %v", err)
+	}
+	// The identical call must only be executed (and recorded) once.
+	if len(d.Steps) != 1 {
+		t.Fatalf("expected 1 executed step, got %d", len(d.Steps))
 	}
 }

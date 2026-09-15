@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -68,6 +69,7 @@ CREATE TABLE IF NOT EXISTS diagnoses (
 	created_at TEXT NOT NULL,
 	updated_at TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_diagnoses_incident ON diagnoses(incident_id);
 
 CREATE TABLE IF NOT EXISTS command_runs (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -83,6 +85,7 @@ CREATE TABLE IF NOT EXISTS command_runs (
 	created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_command_runs_incident ON command_runs(incident_id);
+CREATE INDEX IF NOT EXISTS idx_command_runs_host ON command_runs(host);
 
 CREATE TABLE IF NOT EXISTS memories (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -91,6 +94,7 @@ CREATE TABLE IF NOT EXISTS memories (
 	tags_json TEXT NOT NULL DEFAULT '[]',
 	created_at TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_memories_topic ON memories(topic);
 
 CREATE TABLE IF NOT EXISTS instructions (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -127,6 +131,7 @@ CREATE TABLE IF NOT EXISTS incident_events (
 	created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_events_incident ON incident_events(incident_id);
+CREATE INDEX IF NOT EXISTS idx_events_incident_kind ON incident_events(incident_id, kind);
 
 CREATE TABLE IF NOT EXISTS retrospectives (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -157,7 +162,10 @@ const timeFmt = time.RFC3339Nano
 func now() string { return time.Now().UTC().Format(timeFmt) }
 
 func timeParse(s string) time.Time {
-	t, _ := time.Parse(timeFmt, s)
+	t, err := time.Parse(timeFmt, s)
+	if err != nil && s != "" {
+		log.Printf("store: malformed timestamp %q: %v", s, err)
+	}
 	return t
 }
 
